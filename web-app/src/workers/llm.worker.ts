@@ -16,13 +16,19 @@ interface ChatMessage {
 const state = {
   messages: [] as ChatMessage[],
   apiKey: import.meta.env.VITE_GEMINI_API_KEY || '',
+  isAborted: false,
 };
 
 // System instruction for the English Mentor persona
 const SYSTEM_INSTRUCTION = {
   parts: [
     {
-      text: "You are an experienced English language mentor. Speak simply, use modern natural phrasing, and correct the user's mistakes gently if they make any. Your response MUST be concise and no longer than 2-3 sentences to maintain a dynamic conversation flow. Do not use complex formatting, just plain text."
+      text: `You are Zero AI, a highly advanced, concise, and conversational voice assistant. 
+RULES:
+1. Keep answers EXTREMELY short (1-2 sentences maximum).
+2. Never use lists, bullet points, or markdown formatting.
+3. Speak naturally like a human in a fast-paced dialogue.
+4. If the user asks a quick question, give a quick answer.`
     }
   ]
 };
@@ -117,7 +123,12 @@ async function generateResponse(userText: string) {
       const lines = chunk.split('\n');
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
+          if (state.isAborted) {
+            reader.cancel();
+            return;
+          }
+
+          if (line.startsWith('data: ')) {
           const dataStr = line.substring(6);
           if (dataStr === '[DONE]') continue;
           
@@ -173,7 +184,12 @@ self.addEventListener('message', async (event: MessageEvent) => {
       self.postMessage({ type: 'LLM_READY' });
       break;
       
+    case 'ABORT_GENERATION':
+      state.isAborted = true;
+      break;
+
     case 'GENERATE_RESPONSE':
+      state.isAborted = false;
       console.log('Generating response for:', payload.prompt);
       await generateResponse(payload.prompt);
       break;

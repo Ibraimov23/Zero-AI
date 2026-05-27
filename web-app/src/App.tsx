@@ -34,6 +34,23 @@ function App() {
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const playbackContextRef = useRef<AudioContext | null>(null);
+  const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // Interrupt AI playback and generation
+  const interruptAi = () => {
+    audioQueueRef.current = []; // Clear queue
+    if (currentAudioSourceRef.current) {
+      try {
+        currentAudioSourceRef.current.stop();
+      } catch (e) {
+        // Ignore if already stopped
+      }
+      currentAudioSourceRef.current = null;
+    }
+    isPlayingRef.current = false;
+    setIsAiSpeaking(false);
+    llmWorkerRef.current?.postMessage({ type: 'ABORT_GENERATION' });
+  };
 
   // Helper to play TTS audio sequentially
   const playNextAudio = () => {
@@ -74,8 +91,10 @@ function App() {
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioCtx.destination);
+    currentAudioSourceRef.current = source;
     
     source.onended = () => {
+      currentAudioSourceRef.current = null;
       isPlayingRef.current = false;
       if (audioQueueRef.current.length === 0) {
         setIsAiSpeaking(false);
@@ -209,6 +228,8 @@ function App() {
   const startListening = async () => {
     if (!isSessionActiveRef.current) return;
 
+    interruptAi(); // STOP AI IMMEDIATELY WHEN LISTENING STARTS
+
     try {
       setTranscript(''); // Clear previous transcript
       setAiResponse('');
@@ -218,7 +239,14 @@ function App() {
       silenceStartRef.current = null;
       shouldProcessAudioRef.current = true;
       
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }, 
+        video: false 
+      });
       mediaStreamRef.current = stream;
       
       const mediaRecorder = new MediaRecorder(stream);
