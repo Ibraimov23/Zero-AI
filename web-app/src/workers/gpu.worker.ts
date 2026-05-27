@@ -44,9 +44,12 @@ async function initModels() {
     self.postMessage({ type: 'STATUS', payload: 'Checking WebGPU support...' });
     
     // Check if WebGPU is supported on this device/browser
-    const hasWebGPU = 'gpu' in navigator;
+    // WebGPU is currently unstable on many mobile Android/iOS devices for heavy transformer graphs
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const hasWebGPU = !isMobile && 'gpu' in navigator;
+    
     const device = hasWebGPU ? 'webgpu' : 'wasm';
-    const dtype = hasWebGPU ? 'fp16' : 'fp32';
+    const dtype = hasWebGPU ? 'fp32' : 'q4'; // Use quantized q4 on mobile CPU to save RAM!
 
     self.postMessage({
       type: 'STATUS',
@@ -60,14 +63,17 @@ async function initModels() {
       'onnx-community/whisper-tiny.en', 
       {
         device: device as any,
-        dtype: 'fp32', // Fallback to fp32 to avoid graph errors in Whisper
+        dtype: {
+          encoder_model: dtype,
+          decoder_model_merged: dtype,
+        },
       }
     );
 
-    // 🛑 ПРИЧИНА 2 ИСПРАВЛЕНА: Принудительный запуск TTS на WebGPU
+    // 🛑 ПРИЧИНА 2 ИСПРАВЛЕНА: Принудительный запуск TTS на WebGPU (только для ПК)
     // Используем fp32, чтобы обойти баги компиляции Kokoro на мобильных чипах
     const ttsDevice = hasWebGPU ? 'webgpu' : 'wasm';
-    const ttsDtype = 'fp32';
+    const ttsDtype = 'fp32'; // Kokoro does not support q4 yet, keep fp32
     
     self.postMessage({
       type: 'STATUS',

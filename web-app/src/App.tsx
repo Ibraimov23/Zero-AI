@@ -308,8 +308,8 @@ function App() {
           // User has spoken, now detecting silence
           if (!silenceStartRef.current) {
             silenceStartRef.current = Date.now();
-          } else if (Date.now() - silenceStartRef.current > 1500) { 
-            // 1.5 seconds of silence detected!
+          } else if (Date.now() - silenceStartRef.current > 800) { 
+            // 800ms of silence detected (Fast Mobile Response!)
             console.log('Silence detected! Stopping mic to process...');
             stopListening(true);
             return;

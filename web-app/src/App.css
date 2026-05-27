@@ -160,40 +160,41 @@ body {
   align-items: center;
 }
 
-/* Translucent Glowing Petals */
+/* Translucent Glowing Petals (MOBILE OPTIMIZED) */
 .petal {
   position: absolute;
   border-radius: 40% 60% 60% 40% / 50% 50% 50% 50%;
-  filter: blur(12px);
-  mix-blend-mode: screen;
-  opacity: 0.85;
+  /* REMOVED: filter: blur(12px) and mix-blend-mode: screen */
+  /* REPLACED WITH: standard opacity and soft box-shadows for 60fps mobile rendering */
+  opacity: 0.6;
+  box-shadow: inset 0 0 20px rgba(255,255,255,0.2);
   transition: all 0.8s ease;
   z-index: 2;
   animation: morphPetal 8s ease-in-out infinite alternate, spinPetal 20s linear infinite;
+  will-change: transform, border-radius; /* Hardware acceleration hint */
 }
 
 /* Default state petals (Calm Purple/Blue) */
-.petal-1 { width: 90%; height: 90%; background: radial-gradient(circle at 30% 30%, #e9d5ff, #8b5cf6); animation-delay: 0s; }
-.petal-2 { width: 95%; height: 85%; background: radial-gradient(circle at 70% 60%, #d8b4fe, #6366f1); animation-delay: -2s; animation-direction: reverse; }
-.petal-3 { width: 85%; height: 95%; background: radial-gradient(circle at 40% 80%, #c4b5fd, #a855f7); animation-delay: -4s; }
-.petal-4 { width: 80%; height: 90%; background: radial-gradient(circle at 60% 40%, #a78bfa, #7c3aed); animation-delay: -6s; animation-direction: reverse; }
+.petal-1 { width: 90%; height: 90%; background: linear-gradient(135deg, #e9d5ff, #8b5cf6); animation-delay: 0s; }
+.petal-2 { width: 95%; height: 85%; background: linear-gradient(135deg, #d8b4fe, #6366f1); animation-delay: -2s; animation-direction: reverse; }
+.petal-3 { width: 85%; height: 95%; background: linear-gradient(135deg, #c4b5fd, #a855f7); animation-delay: -4s; }
+.petal-4 { width: 80%; height: 90%; background: linear-gradient(135deg, #a78bfa, #7c3aed); animation-delay: -6s; animation-direction: reverse; }
 
-/* AI Speaking state petals (Intense WOW effect) */
+/* AI Speaking state petals (Intense WOW effect - Mobile Safe) */
 .orb-container.ai-speaking .petal {
-  opacity: 1;
-  filter: blur(16px);
+  opacity: 0.85;
 }
 
-.orb-container.ai-speaking .petal-1 { background: radial-gradient(circle, #d8b4fe, #9333ea, transparent 70%); animation-duration: 4s, 8s; }
-.orb-container.ai-speaking .petal-2 { background: radial-gradient(circle, #f9a8d4, #db2777, transparent 70%); animation-duration: 5s, 9s; }
-.orb-container.ai-speaking .petal-3 { background: radial-gradient(circle, #93c5fd, #2563eb, transparent 70%); animation-duration: 4.5s, 7s; }
-.orb-container.ai-speaking .petal-4 { background: radial-gradient(circle, #f0abfc, #c026d3, transparent 70%); animation-duration: 3.5s, 6s; }
+.orb-container.ai-speaking .petal-1 { background: linear-gradient(135deg, #d8b4fe, #9333ea); animation-duration: 4s, 8s; }
+.orb-container.ai-speaking .petal-2 { background: linear-gradient(135deg, #f9a8d4, #db2777); animation-duration: 5s, 9s; }
+.orb-container.ai-speaking .petal-3 { background: linear-gradient(135deg, #93c5fd, #2563eb); animation-duration: 4.5s, 7s; }
+.orb-container.ai-speaking .petal-4 { background: linear-gradient(135deg, #f0abfc, #c026d3); animation-duration: 3.5s, 6s; }
 
 /* Recording state (warm tint) */
-.orb-container.active .petal-1 { background: radial-gradient(circle at 30% 30%, #fecaca, #ef4444); }
-.orb-container.active .petal-2 { background: radial-gradient(circle at 70% 60%, #fbcfe8, #ec4899); }
-.orb-container.active .petal-3 { background: radial-gradient(circle at 40% 80%, #fed7aa, #f97316); }
-.orb-container.active .petal-4 { background: radial-gradient(circle at 60% 40%, #fca5a5, #dc2626); }
+.orb-container.active .petal-1 { background: linear-gradient(135deg, #fecaca, #ef4444); }
+.orb-container.active .petal-2 { background: linear-gradient(135deg, #fbcfe8, #ec4899); }
+.orb-container.active .petal-3 { background: linear-gradient(135deg, #fed7aa, #f97316); }
+.orb-container.active .petal-4 { background: linear-gradient(135deg, #fca5a5, #dc2626); }
 
 /* The Bright White Core */
 .orb-core {
