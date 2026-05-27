@@ -747,9 +747,13 @@ function App() {
   const showBudgetWarning = budgetProgress >= 75;
   const isBudgetCritical = budgetProgress >= 90;
   const currentFocusOptions = LESSON_FOCUS_OPTIONS[tutorMode];
+  const hasTranscript = Boolean(transcript && !isListening);
+  const hasAiResponse = Boolean(aiResponse);
+  const subtitleLayoutClass = hasTranscript && hasAiResponse ? 'dual-card' : hasTranscript || hasAiResponse ? 'single-card' : 'idle';
+  const sessionHealthLabel = isBudgetCritical ? 'High Budget' : showBudgetWarning ? 'Budget Warning' : '';
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${isListening ? 'state-listening' : ''} ${isAiSpeaking ? 'state-speaking' : ''} ${isThinking ? 'state-thinking' : ''}`}>
       {/* Background Particles */}
       <div className="particles-layer">
         {particles.map(p => (
@@ -768,74 +772,84 @@ function App() {
         ))}
       </div>
 
-      <div className="top-tags tutor-mode-row">
-        {TUTOR_MODE_OPTIONS.map(option => (
-          <button
-            key={option.value}
-            className={`tag tutor-tag ${tutorMode === option.value ? 'active' : ''}`}
-            onClick={() => handleTutorModeChange(option.value)}
-            type="button"
-            disabled={isThinking}
-            title={option.hint}
-          >
-            <span>{option.label}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="top-tags lesson-focus-row">
-        {currentFocusOptions.map(focus => (
-          <button
-            key={focus}
-            className={`tag tutor-tag subgoal-tag ${lessonFocus === focus ? 'active' : ''}`}
-            onClick={() => handleLessonFocusChange(focus)}
-            type="button"
-            disabled={isThinking}
-            title={focus}
-          >
-            <span>{focus}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Greeting and Status Header */}
-      <div className="status-header">
-        <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
-        <div className="main-prompt">
-          {isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
-        </div>
-        <div className="status-text">{status}</div>
-        <div className="session-panel">
-          <div className="session-meta">
-            <span>{TUTOR_MODE_OPTIONS.find(option => option.value === sessionMetrics.tutorMode)?.label ?? 'Free Speaking'}</span>
-            <span>{sessionMetrics.lessonFocus}</span>
-            <span>{sessionMetrics.estimatedTotalTokens}/{sessionMetrics.tokenBudget} tokens</span>
-            <span>{sessionMetrics.memoryItems} memory</span>
+      <div className="hero-shell">
+        <div className="control-deck">
+          <div className="top-tags tutor-mode-row">
+            {TUTOR_MODE_OPTIONS.map(option => (
+              <button
+                key={option.value}
+                className={`tag tutor-tag ${tutorMode === option.value ? 'active' : ''}`}
+                onClick={() => handleTutorModeChange(option.value)}
+                type="button"
+                disabled={isThinking}
+                title={option.hint}
+              >
+                <span>{option.label}</span>
+              </button>
+            ))}
           </div>
-          <div className="budget-bar">
-            <div className="budget-fill" style={{ width: `${budgetProgress}%` }} />
+
+          <div className="top-tags lesson-focus-row">
+            {currentFocusOptions.map(focus => (
+              <button
+                key={focus}
+                className={`tag tutor-tag subgoal-tag ${lessonFocus === focus ? 'active' : ''}`}
+                onClick={() => handleLessonFocusChange(focus)}
+                type="button"
+                disabled={isThinking}
+                title={focus}
+              >
+                <span>{focus}</span>
+              </button>
+            ))}
           </div>
-          {showBudgetWarning ? (
-            <div className={`budget-warning ${isBudgetCritical ? 'critical' : ''}`}>
-              <div className="budget-warning-text">
-                {isBudgetCritical
-                  ? 'Session budget is very high. Reset now or compress memory to save tokens.'
-                  : 'Session budget reached 75%. You can compress memory or reset the session to save tokens.'}
-              </div>
-              <div className="budget-warning-actions">
-                <button className="secondary-action-button" type="button" onClick={handleCompressMemory}>
-                  Compress Memory
-                </button>
-                <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
-                  Reset Session
-                </button>
-              </div>
+
+          {/* Greeting and Status Header */}
+          <div className="status-header">
+            <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
+            <div className="main-prompt">
+              {isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
             </div>
-          ) : (
-            <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
-              Reset Session
-            </button>
-          )}
+            <div className="status-text">{status}</div>
+          </div>
+
+          <div className="session-panel">
+            <div className="session-panel-header">
+              <div className="session-panel-title-group">
+                <div className="session-panel-label">Session Intelligence</div>
+                <div className="session-panel-title">Adaptive Tutor Memory</div>
+              </div>
+              {showBudgetWarning ? (
+                <div className={`session-health-badge ${isBudgetCritical ? 'critical' : 'warning'}`}>
+                  {sessionHealthLabel}
+                </div>
+              ) : null}
+            </div>
+            <div className="budget-bar">
+              <div className="budget-fill" style={{ width: `${budgetProgress}%` }} />
+            </div>
+            {showBudgetWarning ? (
+              <div className={`budget-warning ${isBudgetCritical ? 'critical' : ''}`}>
+                <div className="budget-warning-text">
+                  {isBudgetCritical
+                    ? 'Session budget is very high. Reset now or compress memory to save tokens.'
+                    : 'Session budget reached 75%. You can compress memory or reset the session to save tokens.'}
+                </div>
+                <div className="budget-warning-actions">
+                  <button className="secondary-action-button" type="button" onClick={handleCompressMemory}>
+                    Compress Memory
+                  </button>
+                  <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
+                    Reset Session
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
+                Reset Session
+              </button>
+            )}
+          </div>
         </div>
       </div>
       
@@ -850,13 +864,15 @@ function App() {
         </div>
       </div>
 
-      <div className="text-container">
-        {transcript && !isListening && (
-          <div className="user-text">
+      <div className={`text-container ${hasTranscript || hasAiResponse ? 'engaged' : ''} ${subtitleLayoutClass}`}>
+        {hasTranscript && (
+          <div className="user-text transcript-card">
+            <div className="text-label">You said</div>
             {transcript}
           </div>
         )}
-        <div className="ai-text">
+        <div className={`ai-text response-card ${hasAiResponse ? 'has-content' : 'is-placeholder'}`}>
+          <div className="text-label ai-label">Zero AI</div>
           {aiResponse ? aiResponse : <span className="placeholder-text">Wait for response...</span>}
         </div>
       </div>
@@ -887,6 +903,9 @@ function App() {
               </svg>
             )}
           </button>
+        </div>
+        <div className="control-caption">
+          {isListening ? 'Speak naturally. Zero AI will wait for your pause.' : 'Tap once to start your lesson.'}
         </div>
       </div>
     </div>
