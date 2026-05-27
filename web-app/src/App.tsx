@@ -7,8 +7,7 @@ function App() {
   const [isThinking, setIsThinking] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
   
-  const [isSessionActive, setIsSessionActive] = useState(false); // Master toggle for hands-free
-  const [isListening, setIsListening] = useState(false); // When actively collecting audio
+  const [isListening, setIsListening] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
   
@@ -46,7 +45,6 @@ function App() {
         ) {
           console.log('[Cloud STT] Ignored hallucination/silence:', text);
           setStatus('Waiting for next interaction');
-          if (isSessionActiveRef.current) startListening();
           return;
         }
 
@@ -62,6 +60,7 @@ function App() {
       setStatus('Error: Cloud STT Failed');
     }
   };
+
   // OpenAI TTS integration
   const synthesizeWithOpenAI = async (text: string) => {
     if (!text.trim()) return;
@@ -102,7 +101,6 @@ function App() {
   const silenceStartRef = useRef<number | null>(null);
   const shouldProcessAudioRef = useRef<boolean>(false); // to prevent processing on forced stop
   const audioVolumeRef = useRef<number>(1); // To store current audio volume for visualizer
-  const requestRef = useRef<number>(0);
 
   // Utility: Trigger Haptic Feedback (vibration on mobile)
   const triggerHaptic = (type: 'light' | 'medium' | 'heavy' = 'light') => {
@@ -113,37 +111,24 @@ function App() {
     }
   };
 
-  // Keep a mutable ref of session active state for use in callbacks
-  const isSessionActiveRef = useRef<boolean>(false);
-
   // TTS Playback Queue Refs
   const audioQueueRef = useRef<{buffer: AudioBuffer, text: string}[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
-  const resumeTimeoutRef = useRef<number | null>(null); // NEW: Timeout ref to prevent rogue mic openings
   
   // NEW: Ref to track if LLM is still streaming and pending TTS requests
   const isLlmStreamingRef = useRef<boolean>(false);
   const pendingTtsRequestsRef = useRef<number>(0);
 
-  // Helper to check if AI is completely finished and we should resume listening
+  // Helper to check if AI is completely finished
   const checkAiFinishedAndResume = () => {
     if (!isLlmStreamingRef.current && pendingTtsRequestsRef.current === 0 && audioQueueRef.current.length === 0 && !isPlayingRef.current) {
       setIsAiSpeaking(false);
       setIsThinking(false);
-      
-      if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
-      
-      // Wait 2 seconds for a calm, natural pause before listening again (Calmer Pace)
-      if (isSessionActiveRef.current && !isListening) {
-        resumeTimeoutRef.current = window.setTimeout(() => {
-          if (isSessionActiveRef.current && !isListening && !isPlayingRef.current) {
-            startListening();
-          }
-        }, 2000);
-      }
+      setStatus('Ready');
+      // 🛑 Auto-restart removed for manual control and reliability
     }
   };
 
@@ -151,7 +136,6 @@ function App() {
   const interruptAi = () => {
     isLlmStreamingRef.current = false;
     pendingTtsRequestsRef.current = 0;
-    if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
     if (typewriterIntervalRef.current) {
       clearInterval(typewriterIntervalRef.current);
       typewriterIntervalRef.current = null;
@@ -167,6 +151,7 @@ function App() {
     }
     isPlayingRef.current = false;
     setIsAiSpeaking(false);
+    setIsThinking(false);
     llmWorkerRef.current?.postMessage({ type: 'ABORT_GENERATION' });
   };
 
@@ -279,7 +264,6 @@ function App() {
         case 'STREAM_END':
           console.log('[LLM Stream End]');
           isLlmStreamingRef.current = false;
-          setStatus('Waiting for next interaction');
           checkAiFinishedAndResume();
           break;
           
@@ -307,25 +291,25 @@ function App() {
     };
   }, []);
 
-  const toggleSession = async () => {
-    triggerHaptic('light'); // Light feedback on user tap
-    if (isSessionActive) {
-      // Stop completely
-      setIsSessionActive(false);
-      isSessionActiveRef.current = false;
-      stopListening(false);
-      setStatus('Session ended');
+  const handleMicClick = async () => {
+    triggerHaptic('medium');
+    
+    if (isListening) {
+      // Manual Stop & Send
+      console.log('[UI] Manual stop & process');
+      stopListening(true);
+    } else if (isAiSpeaking || isThinking) {
+      // Manual Interrupt
+      console.log('[UI] Interrupting AI');
+      interruptAi();
+      setStatus('Interrupted. Ready.');
     } else {
-      // Start continuous session
-      setIsSessionActive(true);
-      isSessionActiveRef.current = true;
+      // Start Listening
       await startListening();
     }
   };
 
   const startListening = async () => {
-    if (!isSessionActiveRef.current) return;
-
     interruptAi(); // STOP AI IMMEDIATELY WHEN LISTENING STARTS
 
     try {
@@ -338,7 +322,6 @@ function App() {
       shouldProcessAudioRef.current = true;
       
       // 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Разблокировка AudioContext на iPhone (Safari)
-      // На iOS звук должен быть запущен в тот же момент, когда юзер кликнул по экрану
       if (!playbackContextRef.current) {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         playbackContextRef.current = new AudioContextClass();
@@ -373,25 +356,23 @@ function App() {
 
       mediaRecorder.onstop = async () => {
         setIsListening(false);
-        setIsThinking(true); // Start thinking animation
 
         if (!shouldProcessAudioRef.current) {
           setIsThinking(false);
           return; // Discard audio if stopped forcefully
         }
-
+        
+        setIsThinking(true); // Start thinking animation
         setStatus('Sending to OpenAI STT...');
         
         try {
           const blob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
-          
           // FAST CLOUD STT: Send blob directly to OpenAI
           transcribeWithOpenAI(blob);
-          
         } catch (error) {
           console.error('Audio processing error:', error);
           setStatus('Error: Failed to process audio');
-          if (isSessionActiveRef.current) startListening();
+          setIsThinking(false);
         }
       };
 
@@ -404,7 +385,8 @@ function App() {
       source.connect(analyserRef.current);
 
       const checkSilence = () => {
-        if (!analyserRef.current || !isSessionActiveRef.current) return;
+        // If we manually stopped listening, abort VAD loop
+        if (!analyserRef.current) return;
         
         const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
         analyserRef.current.getByteFrequencyData(dataArray);
@@ -431,12 +413,15 @@ function App() {
           // User has spoken, now detecting silence
           if (!silenceStartRef.current) {
             silenceStartRef.current = Date.now();
-          } else if (Date.now() - silenceStartRef.current > 800) { 
-            // 800ms of silence detected (Fast Mobile Response!)
+          } else if (Date.now() - silenceStartRef.current > 1500) { 
+            // 🛑 MANUAL MODE: Auto-stop is temporarily disabled so the AI doesn't interrupt the user.
+            // The user will manually click the microphone button to stop recording and send.
+            /*
             console.log('Silence detected! Stopping mic to process...');
-            triggerHaptic('heavy'); // Heavy feedback when AI takes over
+            triggerHaptic('heavy'); 
             stopListening(true);
             return;
+            */
           }
         }
         vadFrameRef.current = requestAnimationFrame(checkSilence);
@@ -448,15 +433,16 @@ function App() {
     } catch (err) {
       console.error('Error accessing microphone:', err);
       setStatus('Error: Could not access microphone');
-      setIsSessionActive(false);
-      isSessionActiveRef.current = false;
     }
   };
 
   const stopListening = (process: boolean) => {
     shouldProcessAudioRef.current = process;
     
-    if (vadFrameRef.current) cancelAnimationFrame(vadFrameRef.current);
+    if (vadFrameRef.current) {
+      cancelAnimationFrame(vadFrameRef.current);
+      vadFrameRef.current = null;
+    }
     if (vadContextRef.current) {
       vadContextRef.current.close();
       vadContextRef.current = null;
@@ -470,6 +456,12 @@ function App() {
       mediaStreamRef.current = null;
     }
     setIsListening(false);
+    
+    // Reset visualizer scale immediately
+    const sphereEl = document.querySelector('.orb') as HTMLElement | null;
+    if (sphereEl) {
+      sphereEl.style.transform = `scale(1)`;
+    }
   };
 
   // Generate random particles for background
@@ -483,6 +475,8 @@ function App() {
       size: `${1 + Math.random() * 3}px`
     }));
   }, []);
+
+  const isBusy = isListening || isAiSpeaking || isThinking;
 
   return (
     <div className="app-container">
@@ -508,7 +502,7 @@ function App() {
       <div className="status-header">
         <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
         <div className="main-prompt">
-          {isSessionActive ? (isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : "THINKING...") : "SAY SOMETHING"}
+          {isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
         </div>
         <div className="status-text">{status}</div>
       </div>
@@ -526,7 +520,7 @@ function App() {
 
       <div className="text-container">
         {transcript && !isListening && (
-          <div className="user-text" style={{ color: '#94a3b8', marginBottom: '1rem', fontSize: '0.9rem' }}>
+          <div className="user-text">
             {transcript}
           </div>
         )}
@@ -545,11 +539,11 @@ function App() {
             </>
           )}
           <button 
-            className={`mic-button ${isSessionActive ? 'recording' : ''}`}
-            onClick={toggleSession}
-            disabled={!isReady && !isSessionActive}
+            className={`mic-button ${isBusy ? 'recording' : ''}`}
+            onClick={handleMicClick}
+            disabled={!isReady}
           >
-            {isSessionActive ? (
+            {isBusy ? (
               <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="7" y="7" width="10" height="10" rx="2" />
               </svg>
