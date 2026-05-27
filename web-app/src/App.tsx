@@ -14,6 +14,34 @@ function App() {
   const gpuWorkerRef = useRef<Worker | null>(null);
   const llmWorkerRef = useRef<Worker | null>(null);
 
+  // OpenAI TTS integration
+  const synthesizeWithOpenAI = async (text: string) => {
+    if (!text.trim()) return;
+    try {
+      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'tts-1', // You can use tts-1-hd for higher quality
+          input: text,
+          voice: 'nova', // Alloy, echo, fable, onyx, nova, or shimmer
+          response_format: 'mp3',
+        }),
+      });
+
+      if (!response.ok) throw new Error(`OpenAI TTS Error: ${response.statusText}`);
+      
+      const arrayBuffer = await response.arrayBuffer();
+      audioQueueRef.current.push(arrayBuffer);
+      playNextAudio();
+    } catch (error) {
+      console.error('TTS Error:', error);
+    }
+  };
+
   // Audio State Refs
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -31,7 +59,7 @@ function App() {
   const isSessionActiveRef = useRef<boolean>(false);
 
   // TTS Playback Queue Refs
-  const audioQueueRef = useRef<Float32Array[]>([]);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -53,7 +81,7 @@ function App() {
   };
 
   // Helper to play TTS audio sequentially
-  const playNextAudio = () => {
+  const playNextAudio = async () => {
     if (isPlayingRef.current || audioQueueRef.current.length === 0) {
       if (audioQueueRef.current.length === 0 && !isPlayingRef.current) {
         setIsAiSpeaking(false);
@@ -78,38 +106,43 @@ function App() {
 
     if (!playbackContextRef.current) {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      playbackContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      playbackContextRef.current = new AudioContextClass(); // Use default sample rate for decoding
     }
 
     const audioCtx = playbackContextRef.current;
     if (audioCtx.state === 'suspended') audioCtx.resume();
 
-    const audioBuffer = audioCtx.createBuffer(1, audioData.length, 24000);
-    const standardArray = new Float32Array(audioData);
-    audioBuffer.copyToChannel(standardArray, 0);
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
-    currentAudioSourceRef.current = source;
-    
-    source.onended = () => {
-      currentAudioSourceRef.current = null;
-      isPlayingRef.current = false;
-      if (audioQueueRef.current.length === 0) {
-        setIsAiSpeaking(false);
-        // Automatically restart listening if session is still active!
-        if (isSessionActiveRef.current) {
-          setTimeout(() => {
-            if (isSessionActiveRef.current) startListening();
-          }, 600);
+    try {
+      // Decode the MP3 array buffer from OpenAI
+      const audioBuffer = await audioCtx.decodeAudioData(audioData);
+      
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      currentAudioSourceRef.current = source;
+      
+      source.onended = () => {
+        currentAudioSourceRef.current = null;
+        isPlayingRef.current = false;
+        if (audioQueueRef.current.length === 0) {
+          setIsAiSpeaking(false);
+          // Automatically restart listening if session is still active!
+          if (isSessionActiveRef.current) {
+            setTimeout(() => {
+              if (isSessionActiveRef.current) startListening();
+            }, 600);
+          }
+        } else {
+          playNextAudio();
         }
-      } else {
-        playNextAudio();
-      }
-    };
+      };
 
-    source.start(0);
+      source.start(0);
+    } catch (error) {
+      console.error('Audio playback error:', error);
+      isPlayingRef.current = false;
+      playNextAudio(); // Skip to next if decoding fails
+    }
   };
 
   useEffect(() => {
@@ -143,10 +176,9 @@ function App() {
           break;
           
         case 'AUDIO_CHUNK_READY':
-          console.log('[GPU Worker TTS Audio Ready]');
+          // Legacy support if Kokoro is still used
           if (payload instanceof ArrayBuffer) {
-            audioQueueRef.current.push(new Float32Array(payload));
-            playNextAudio();
+            // We ignore local Kokoro audio now to prevent duplicate playback
           }
           break;
           
@@ -175,8 +207,8 @@ function App() {
           
         case 'SENTENCE_READY':
           console.log('[LLM Sentence Ready for TTS]:', payload);
-          // Forward to gpu.worker.ts for TTS
-          gpuWorkerRef.current?.postMessage({ type: 'SYNTHESIZE_TEXT', payload });
+          // 🛑 2. Use Cloud TTS (OpenAI) instead of local Kokoro for ultra-low latency
+          synthesizeWithOpenAI(payload);
           break;
           
         case 'STREAM_END':

@@ -6,7 +6,6 @@ import {
   env,
   AutomaticSpeechRecognitionPipeline,
 } from '@huggingface/transformers';
-import { KokoroTTS } from 'kokoro-js';
 
 // ==========================================
 // 1. Environment Setup
@@ -26,13 +25,11 @@ if (env.backends.onnx.wasm) {
 // ==========================================
 interface ModelsState {
   speechToText: AutomaticSpeechRecognitionPipeline | null;
-  textToSpeech: any | null; // Using any for KokoroTTS instance
   embeddings: any | null;
 }
 
 const state: ModelsState = {
   speechToText: null,
-  textToSpeech: null,
   embeddings: null,
 };
 
@@ -67,25 +64,6 @@ async function initModels() {
           encoder_model: dtype,
           decoder_model_merged: dtype,
         },
-      }
-    );
-
-    // 🛑 ПРИЧИНА 2 ИСПРАВЛЕНА: Принудительный запуск TTS на WebGPU (только для ПК)
-    // Используем fp32, чтобы обойти баги компиляции Kokoro на мобильных чипах
-    const ttsDevice = hasWebGPU ? 'webgpu' : 'wasm';
-    const ttsDtype = 'fp32'; // Kokoro does not support q4 yet, keep fp32
-    
-    self.postMessage({
-      type: 'STATUS',
-      payload: `Initializing Kokoro TTS model (Device: ${ttsDevice}, Dtype: ${ttsDtype})...`,
-    });
-
-    // Initialize Kokoro TTS Pipeline using kokoro-js
-    state.textToSpeech = await KokoroTTS.from_pretrained(
-      'onnx-community/Kokoro-82M-v1.0-ONNX', 
-      {
-        dtype: ttsDtype,
-        device: ttsDevice,
       }
     );
 
@@ -136,43 +114,7 @@ async function transcribeAudio(audioData: Float32Array) {
 }
 
 // ==========================================
-// 5. Synthesize Speech (TTS)
-// ==========================================
-async function synthesizeSpeech(text: string) {
-  if (!state.textToSpeech) {
-    self.postMessage({
-      type: 'ERROR',
-      payload: 'Text-to-Speech model is not initialized yet.',
-    });
-    return;
-  }
-
-  try {
-    // Synthesize speech using KokoroTTS
-    const audio = await state.textToSpeech.generate(text, {
-      voice: 'af_bella',
-      speed: 1.0
-    });
-
-    // Kokoro generate returns RawAudio which has .audio (Float32Array) and .sampling_rate (24000)
-    const float32Array = audio.audio;
-    const buffer = float32Array.buffer;
-
-    self.postMessage(
-      { type: 'AUDIO_CHUNK_READY', payload: buffer },
-      { transfer: [buffer] } // Use WindowPostMessageOptions format
-    );
-  } catch (error) {
-    console.error('TTS error:', error);
-    self.postMessage({
-      type: 'ERROR',
-      payload: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-// ==========================================
-// 6. Message Event Listener
+// 5. Message Event Listener
 // ==========================================
 self.addEventListener('message', async (event: MessageEvent) => {
   const { type, payload } = event.data;
@@ -194,12 +136,6 @@ self.addEventListener('message', async (event: MessageEvent) => {
           type: 'ERROR',
           payload: 'Invalid audio format. Expected ArrayBuffer or Float32Array.',
         });
-      }
-      break;
-
-    case 'SYNTHESIZE_TEXT':
-      if (typeof payload === 'string') {
-        await synthesizeSpeech(payload);
       }
       break;
 
