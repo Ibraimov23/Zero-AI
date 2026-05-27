@@ -24,6 +24,7 @@ export default async function handler(req: Request) {
         input: text,
         voice: 'nova',
         response_format: 'mp3',
+        speed: 0.9, // 🛑 Slightly slower speech for a calmer, less rushed conversation
       }),
     });
 

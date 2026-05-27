@@ -19,10 +19,10 @@ function App() {
     try {
       const formData = new FormData();
       formData.append('file', blob, 'audio.webm');
-      // model and language parameters are now handled by the backend edge function,
-      // but we can still send them here and let the proxy forward them.
       formData.append('model', 'whisper-1');
       formData.append('language', 'en'); // Force English for speed
+      formData.append('temperature', '0'); // Strict deterministic transcription to prevent hallucinations
+      formData.append('prompt', 'Hello, this is a conversation. Please do not transcribe silence or background noise.');
 
       const response = await fetch('/api/stt', {
         method: 'POST',
@@ -33,12 +33,29 @@ function App() {
       
       const data = await response.json();
       if (data.text) {
-        console.log('[Cloud STT Transcript]:', data.text);
-        setTranscript(data.text);
+        const text = data.text.trim();
+        const lowerText = text.toLowerCase();
+        
+        // 🛑 Ignore known Whisper hallucinations on silence or short background noises
+        if (
+          !text || 
+          lowerText === 'thank you.' || 
+          lowerText === 'thank you for watching.' || 
+          lowerText === 'you' ||
+          lowerText.includes('amara.org')
+        ) {
+          console.log('[Cloud STT] Ignored hallucination/silence:', text);
+          setStatus('Waiting for next interaction');
+          if (isSessionActiveRef.current) startListening();
+          return;
+        }
+
+        console.log('[Cloud STT Transcript]:', text);
+        setTranscript(text);
         setStatus('Reasoning (Gemini 2.5 Flash)...');
         setAiResponse('');
         isLlmStreamingRef.current = true;
-        llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: data.text } });
+        llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: text } });
       }
     } catch (error) {
       console.error('Cloud STT Error:', error);
@@ -105,6 +122,7 @@ function App() {
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
+  const resumeTimeoutRef = useRef<number | null>(null); // NEW: Timeout ref to prevent rogue mic openings
   
   // NEW: Ref to track if LLM is still streaming and pending TTS requests
   const isLlmStreamingRef = useRef<boolean>(false);
@@ -116,13 +134,15 @@ function App() {
       setIsAiSpeaking(false);
       setIsThinking(false);
       
-      // Wait 1.2 seconds for a calm, natural pause before listening again
+      if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
+      
+      // Wait 2 seconds for a calm, natural pause before listening again (Calmer Pace)
       if (isSessionActiveRef.current && !isListening) {
-        setTimeout(() => {
+        resumeTimeoutRef.current = window.setTimeout(() => {
           if (isSessionActiveRef.current && !isListening && !isPlayingRef.current) {
             startListening();
           }
-        }, 1200);
+        }, 2000);
       }
     }
   };
@@ -131,6 +151,7 @@ function App() {
   const interruptAi = () => {
     isLlmStreamingRef.current = false;
     pendingTtsRequestsRef.current = 0;
+    if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
     if (typewriterIntervalRef.current) {
       clearInterval(typewriterIntervalRef.current);
       typewriterIntervalRef.current = null;
@@ -402,7 +423,7 @@ function App() {
         }
 
         // VAD Logic
-        if (avg > 10) { 
+        if (avg > 18) { 
           // Volume threshold exceeded (User is speaking)
           hasSpokenRef.current = true;
           silenceStartRef.current = null;
