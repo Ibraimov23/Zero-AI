@@ -20,7 +20,12 @@ export default async function handler(req: Request) {
         parts: [{ text: "You are Zero AI, a highly advanced, concise, and conversational voice assistant. RULES: 1. Keep answers EXTREMELY short (1-2 sentences maximum). 2. Never use lists, bullet points, or markdown formatting. 3. Speak naturally like a human in a fast-paced dialogue. 4. If the user asks a quick question, give a quick answer." }]
       },
       contents: body.contents,
-      generationConfig: body.generationConfig || { temperature: 0.7 }
+      generationConfig: {
+        temperature: 0.5, // Lower temperature = faster, more deterministic responses
+        maxOutputTokens: 60, // STRICT COST CONTROL: Max ~40-50 words. Prevents run-on generations and saves money.
+        topK: 1, // Faster sampling
+        stopSequences: ["\n\n", "User:"], // Stops generation immediately if it tries to hallucinate a dialogue or write paragraphs
+      }
     };
 
     // Forward the request body directly to Gemini (SSE Stream)

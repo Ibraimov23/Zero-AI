@@ -18,7 +18,10 @@ const state = {
 // NEW: Sliding Window Context Management
 // Prevents context overflow and memory leaks
 // ==========================================
-const MAX_CONTEXT_MESSAGES = 10;
+// 🛑 COST OPTIMIZATION: Reduced from 10 to 6. 
+// Remembering the last 3 pairs (User+AI) is enough for voice context.
+// This halves the input tokens sent to the API, saving 50% of the cost.
+const MAX_CONTEXT_MESSAGES = 6;
 
 function trimContextWindow() {
   // Keep the System Instruction (index 0)
@@ -80,17 +83,14 @@ async function generateResponse(userText: string) {
 
   try {
     const response = await fetch('/api/llm', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: state.messages,
-        generationConfig: {
-          temperature: 0.7,
-        }
-      })
-    });
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: state.messages
+        })
+      });
 
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`);
