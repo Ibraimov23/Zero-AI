@@ -17,12 +17,12 @@ export default async function handler(req: Request) {
     // Re-inject the system instruction on the server side for security
     const requestBody = {
       systemInstruction: {
-        parts: [{ text: "You are Zero AI, a highly advanced, concise, and conversational voice assistant. RULES: 1. Keep answers EXTREMELY short (1-2 sentences maximum). 2. Never use lists, bullet points, or markdown formatting. 3. Speak naturally like a human in a fast-paced dialogue. 4. If the user asks a quick question, give a quick answer." }]
+        parts: [{ text: "You are Zero AI, a highly advanced, concise, and conversational voice assistant. RULES: 1. Keep answers EXTREMELY short (1-2 sentences maximum). 2. Never use lists, bullet points, or markdown formatting. 3. Speak naturally like a human in a fast-paced dialogue. 4. ALWAYS end your response with a short, engaging question to keep the conversation going and encourage the user to speak." }]
       },
       contents: body.contents,
       generationConfig: {
         temperature: 0.5, // Lower temperature = faster, more deterministic responses
-        maxOutputTokens: 60, // STRICT COST CONTROL: Max ~40-50 words. Prevents run-on generations and saves money.
+        maxOutputTokens: 80, // STRICT COST CONTROL: Max ~40-50 words. Increased slightly to allow for the mandatory question.
         topK: 1, // Faster sampling
         stopSequences: ["\n\n", "User:"], // Stops generation immediately if it tries to hallucinate a dialogue or write paragraphs
       }

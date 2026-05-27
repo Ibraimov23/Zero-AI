@@ -4,6 +4,7 @@ import './App.css';
 function App() {
   const [status, setStatus] = useState<string>('Initializing...');
   const [isReady, setIsReady] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
   
   const [isSessionActive, setIsSessionActive] = useState(false); // Master toggle for hands-free
@@ -58,7 +59,8 @@ function App() {
       if (!response.ok) throw new Error(`OpenAI TTS Error: ${response.statusText}`);
       
       const arrayBuffer = await response.arrayBuffer();
-      audioQueueRef.current.push(arrayBuffer);
+      // Pass the text along with the audio buffer for the teleprompter effect
+      audioQueueRef.current.push({ buffer: arrayBuffer as unknown as AudioBuffer, text });
       playNextAudio();
     } catch (error) {
       console.error('TTS Error:', error);
@@ -93,13 +95,18 @@ function App() {
   const isSessionActiveRef = useRef<boolean>(false);
 
   // TTS Playback Queue Refs
-  const audioQueueRef = useRef<ArrayBuffer[]>([]);
+  const audioQueueRef = useRef<{buffer: AudioBuffer, text: string}[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const typewriterIntervalRef = useRef<number | null>(null);
 
   // Interrupt AI playback and generation
   const interruptAi = () => {
+    if (typewriterIntervalRef.current) {
+      clearInterval(typewriterIntervalRef.current);
+      typewriterIntervalRef.current = null;
+    }
     audioQueueRef.current = []; // Clear queue
     if (currentAudioSourceRef.current) {
       try {
@@ -131,6 +138,8 @@ function App() {
 
     isPlayingRef.current = true;
     setIsAiSpeaking(true);
+    setIsThinking(false); // 🛑 Stop thinking animation when speaking starts
+
     const audioData = audioQueueRef.current.shift();
     if (!audioData) {
       isPlayingRef.current = false;
@@ -148,8 +157,33 @@ function App() {
 
     try {
       // Decode the MP3 array buffer from OpenAI
-      const audioBuffer = await audioCtx.decodeAudioData(audioData);
+      // Cast it back to ArrayBuffer before decoding
+      const audioBuffer = await audioCtx.decodeAudioData(audioData.buffer as unknown as ArrayBuffer);
       
+      // 🛑 Teleprompter effect: Type out the sentence while audio plays
+      const words = audioData.text.split(' ');
+      // Estimate time per word based on audio duration (fallback to 100ms if very short)
+      const timePerWord = Math.max((audioBuffer.duration * 1000) / (words.length || 1), 50);
+      let wordIndex = 0;
+      
+      if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
+      
+      // Add space before new sentence if there's already text
+      setAiResponse(prev => prev ? prev + ' ' : '');
+      
+      typewriterIntervalRef.current = window.setInterval(() => {
+        if (wordIndex < words.length) {
+          const word = words[wordIndex];
+          setAiResponse(prev => prev + (wordIndex === 0 ? '' : ' ') + word);
+          wordIndex++;
+        } else {
+          if (typewriterIntervalRef.current) {
+            clearInterval(typewriterIntervalRef.current);
+            typewriterIntervalRef.current = null;
+          }
+        }
+      }, timePerWord);
+
       const source = audioCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioCtx.destination);
@@ -195,7 +229,8 @@ function App() {
           break;
           
         case 'TEXT_CHUNK':
-          setAiResponse((prev) => prev + payload);
+          // We ignore TEXT_CHUNK in the UI now, because we stream it via the teleprompter 
+          // synchronized with audio in `playNextAudio`.
           break;
           
         case 'SENTENCE_READY':
@@ -299,8 +334,10 @@ function App() {
 
       mediaRecorder.onstop = async () => {
         setIsListening(false);
+        setIsThinking(true); // Start thinking animation
 
         if (!shouldProcessAudioRef.current) {
+          setIsThinking(false);
           return; // Discard audio if stopped forcefully
         }
 
@@ -437,7 +474,7 @@ function App() {
         <div className="status-text">{status}</div>
       </div>
       
-      <div className={`orb-container ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''}`}>
+      <div className={`orb-container ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''}`}>
         <div className="orb">
           <div className="petal petal-1"></div>
           <div className="petal petal-2"></div>
