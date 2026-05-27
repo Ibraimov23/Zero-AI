@@ -31,6 +31,13 @@ function trimContextWindow() {
   }
 }
 
+function rollbackPendingUserTurn() {
+  const lastMessage = state.messages[state.messages.length - 1];
+  if (lastMessage?.role === 'user') {
+    state.messages.pop();
+  }
+}
+
 
 // ==========================================
 // 2. Sentence Splitter (Buffering)
@@ -74,7 +81,7 @@ class SentenceSplitter {
 // ==========================================
 // 3. Gemini API Integration (Streaming)
 // ==========================================
-async function generateResponse(userText: string) {
+async function generateResponse(userText: string, responseId: number) {
   // Update history with user's message
   state.messages.push({ role: 'user', parts: [{ text: userText }] });
 
@@ -114,6 +121,7 @@ async function generateResponse(userText: string) {
       for (const line of lines) {
           if (state.isAborted) {
             reader.cancel();
+            rollbackPendingUserTurn();
             return;
           }
 
@@ -128,11 +136,11 @@ async function generateResponse(userText: string) {
             if (textChunk) {
               aiFullResponse += textChunk;
               // Send raw chunk to UI for typewriter effect
-              self.postMessage({ type: 'TEXT_CHUNK', payload: textChunk });
+              self.postMessage({ type: 'TEXT_CHUNK', payload: { text: textChunk, responseId } });
               
               // Process through sentence splitter for TTS
               splitter.processChunk(textChunk, (sentence) => {
-                self.postMessage({ type: 'SENTENCE_READY', payload: sentence });
+                self.postMessage({ type: 'SENTENCE_READY', payload: { text: sentence, responseId } });
               });
             }
           } catch (e) {
@@ -144,17 +152,24 @@ async function generateResponse(userText: string) {
 
     // Flush remaining text in the buffer
     splitter.flush((sentence) => {
-      self.postMessage({ type: 'SENTENCE_READY', payload: sentence });
+      self.postMessage({ type: 'SENTENCE_READY', payload: { text: sentence, responseId } });
     });
 
     // Update history with AI's full response
     state.messages.push({ role: 'model', parts: [{ text: aiFullResponse }] });
 
-    self.postMessage({ type: 'STREAM_END' });
+    self.postMessage({ type: 'STREAM_END', payload: { responseId } });
 
   } catch (error) {
+    rollbackPendingUserTurn();
     console.error('Gemini API Error:', error);
-    self.postMessage({ type: 'ERROR', payload: error instanceof Error ? error.message : String(error) });
+    self.postMessage({
+      type: 'ERROR',
+      payload: {
+        responseId,
+        message: error instanceof Error ? error.message : String(error),
+      }
+    });
   }
 }
 
@@ -177,7 +192,7 @@ self.addEventListener('message', async (event: MessageEvent) => {
     case 'GENERATE_RESPONSE':
       state.isAborted = false;
       console.log('Generating response for:', payload.prompt);
-      await generateResponse(payload.prompt);
+      await generateResponse(payload.prompt, payload.responseId);
       break;
       
     default:

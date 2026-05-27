@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 export const config = { runtime: 'edge' };
 
 export default async function handler(req: Request) {
@@ -17,12 +19,12 @@ export default async function handler(req: Request) {
     // Re-inject the system instruction on the server side for security
     const requestBody = {
       systemInstruction: {
-        parts: [{ text: "You are Zero AI, a highly advanced, concise, and conversational voice assistant. RULES: 1. Keep answers EXTREMELY short (1-2 sentences maximum). 2. Never use lists, bullet points, or markdown formatting. 3. Speak naturally like a human in a fast-paced dialogue. 4. ALWAYS end your response with a short, engaging question to keep the conversation going and encourage the user to speak." }]
+        parts: [{ text: "You are Zero AI, a calm and natural English tutor for voice conversations. RULES: 1. Reply in clear spoken English that is easy for a learner to follow. 2. Use 1-3 short sentences, unless a slightly longer explanation is truly needed. 3. Do not rush the conversation. 4. Correct mistakes gently only when it helps learning. 5. Ask at most one short follow-up question, and only when it naturally helps continue practice. 6. Never use lists, bullet points, or markdown formatting." }]
       },
       contents: body.contents,
       generationConfig: {
-        temperature: 0.7, // A bit more creative but still focused
-        maxOutputTokens: 500, // UNLIMITED: Let the AI finish its thought completely
+        temperature: 0.4, // More stable and tutor-like, with fewer rambly responses
+        maxOutputTokens: 180, // Enough to finish a thought without wasting tokens
         topK: 1, // Faster sampling
         stopSequences: ["\n\n", "User:"], // Stops generation immediately if it tries to hallucinate a dialogue or write paragraphs
       }

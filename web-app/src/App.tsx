@@ -13,6 +13,9 @@ function App() {
   
   const llmWorkerRef = useRef<Worker | null>(null);
 
+  const isListeningRef = useRef(false);
+  const isAiSpeakingRef = useRef(false);
+
   // OpenAI Whisper STT Integration (Cloud - Ultra Fast)
   const transcribeWithOpenAI = async (blob: Blob) => {
     try {
@@ -54,11 +57,20 @@ function App() {
         }
 
         console.log('[Cloud STT Transcript]:', text);
+        activeResponseIdRef.current += 1;
+        currentSentenceIndexRef.current = 0;
+        nextSentenceToPlayRef.current = 0;
+        pendingSentenceAudioRef.current.clear();
+        pendingTtsRequestsRef.current = 0;
+        audioQueueRef.current = [];
         setTranscript(text);
         setStatus('Reasoning (Gemini 2.5 Flash)...');
         setAiResponse('');
         isLlmStreamingRef.current = true;
-        llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: text } });
+        llmWorkerRef.current?.postMessage({
+          type: 'GENERATE_RESPONSE',
+          payload: { prompt: text, responseId: activeResponseIdRef.current }
+        });
       }
     } catch (error) {
       console.error('Cloud STT Error:', error);
@@ -68,30 +80,66 @@ function App() {
     }
   };
 
+  const flushPendingSentenceAudio = () => {
+    while (pendingSentenceAudioRef.current.has(nextSentenceToPlayRef.current)) {
+      const nextAudio = pendingSentenceAudioRef.current.get(nextSentenceToPlayRef.current);
+      pendingSentenceAudioRef.current.delete(nextSentenceToPlayRef.current);
+      if (nextAudio) {
+        audioQueueRef.current.push(nextAudio);
+      }
+      nextSentenceToPlayRef.current += 1;
+    }
+    playNextAudio();
+  };
+
   // OpenAI TTS integration
-  const synthesizeWithOpenAI = async (text: string) => {
+  const synthesizeWithOpenAI = async (text: string, responseId: number, sentenceIndex: number) => {
     if (!text.trim()) return;
+    if (responseId !== activeResponseIdRef.current) return;
     pendingTtsRequestsRef.current++;
     try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text }),
-      });
+      let arrayBuffer: ArrayBuffer | null = null;
+      let lastError: unknown = null;
 
-      if (!response.ok) throw new Error(`OpenAI TTS Error: ${response.statusText}`);
-      
-      const arrayBuffer = await response.arrayBuffer();
-      // Pass the text along with the audio buffer for the teleprompter effect
-      audioQueueRef.current.push({ buffer: arrayBuffer as unknown as AudioBuffer, text });
-      playNextAudio();
-    } catch (error) {
-      console.error('TTS Error:', error);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await fetch('/api/tts', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ text }),
+          });
+
+          if (!response.ok) throw new Error(`OpenAI TTS Error: ${response.statusText}`);
+
+          arrayBuffer = await response.arrayBuffer();
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt === 0) {
+            await new Promise(resolve => window.setTimeout(resolve, 150));
+          }
+        }
+      }
+
+      if (responseId !== activeResponseIdRef.current) return;
+
+      if (!arrayBuffer) {
+        console.error('TTS Error: Falling back to subtitles-only chunk', lastError);
+        pendingSentenceAudioRef.current.set(sentenceIndex, { buffer: null, text, responseId, textOnly: true });
+        flushPendingSentenceAudio();
+        return;
+      }
+
+      // Keep sentence order stable even if TTS responses arrive out of order.
+      pendingSentenceAudioRef.current.set(sentenceIndex, { buffer: arrayBuffer, text, responseId, textOnly: false });
+      flushPendingSentenceAudio();
     } finally {
-      pendingTtsRequestsRef.current--;
-      checkAiFinishedAndResume();
+      if (responseId === activeResponseIdRef.current) {
+        pendingTtsRequestsRef.current = Math.max(0, pendingTtsRequestsRef.current - 1);
+        checkAiFinishedAndResume();
+      }
     }
   };
 
@@ -112,7 +160,7 @@ function App() {
 
   // Utility: Trigger Haptic Feedback (vibration on mobile)
   const triggerHaptic = (type: 'light' | 'medium' | 'heavy' = 'light') => {
-    if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+    if (typeof window !== 'undefined' && typeof window.navigator?.vibrate === 'function') {
       if (type === 'light') navigator.vibrate(10);
       else if (type === 'medium') navigator.vibrate(20);
       else navigator.vibrate([20, 30, 20]); // Double pulse
@@ -120,13 +168,17 @@ function App() {
   };
 
   // TTS Playback Queue Refs
-  const audioQueueRef = useRef<{buffer: AudioBuffer, text: string}[]>([]);
+  const audioQueueRef = useRef<{buffer: ArrayBuffer | null, text: string, responseId: number, textOnly: boolean}[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
   const resumeTimeoutRef = useRef<number | null>(null);
   const isSessionActiveRef = useRef<boolean>(false);
+  const activeResponseIdRef = useRef<number>(0);
+  const currentSentenceIndexRef = useRef<number>(0);
+  const nextSentenceToPlayRef = useRef<number>(0);
+  const pendingSentenceAudioRef = useRef<Map<number, {buffer: ArrayBuffer | null, text: string, responseId: number, textOnly: boolean}>>(new Map());
   
   // NEW: Ref to track if LLM is still streaming and pending TTS requests
   const isLlmStreamingRef = useRef<boolean>(false);
@@ -142,10 +194,18 @@ function App() {
       if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
       
       // 🛑 AUTO-RESUME: Wait 1.5 seconds for a natural pause before turning the mic back on
-      if (isSessionActiveRef.current && !isListening) {
+      if (isSessionActiveRef.current && !isListeningRef.current) {
         resumeTimeoutRef.current = window.setTimeout(() => {
-          if (isSessionActiveRef.current && !isListening && !isPlayingRef.current && !isAiSpeaking) {
-             startListening();
+          if (
+            isSessionActiveRef.current &&
+            !isListeningRef.current &&
+            !isPlayingRef.current &&
+            !isAiSpeakingRef.current &&
+            !isLlmStreamingRef.current &&
+            pendingTtsRequestsRef.current === 0 &&
+            audioQueueRef.current.length === 0
+          ) {
+            void startListening();
           }
         }, 1500);
       }
@@ -154,6 +214,10 @@ function App() {
 
   // Interrupt AI playback and generation
   const interruptAi = () => {
+    activeResponseIdRef.current += 1;
+    currentSentenceIndexRef.current = 0;
+    nextSentenceToPlayRef.current = 0;
+    pendingSentenceAudioRef.current.clear();
     isLlmStreamingRef.current = false;
     pendingTtsRequestsRef.current = 0;
     if (typewriterIntervalRef.current) {
@@ -208,9 +272,51 @@ function App() {
     if (audioCtx.state === 'suspended') audioCtx.resume();
 
     try {
+      if (audioData.textOnly || !audioData.buffer) {
+        const words = audioData.text.split(' ');
+        const timePerWord = 85;
+        let wordIndex = 0;
+
+        if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
+
+        typewriterIntervalRef.current = window.setInterval(() => {
+          if (audioData.responseId !== activeResponseIdRef.current) {
+            if (typewriterIntervalRef.current) {
+              clearInterval(typewriterIntervalRef.current);
+              typewriterIntervalRef.current = null;
+            }
+            return;
+          }
+          if (wordIndex < words.length) {
+            const word = words[wordIndex];
+            setAiResponse(prev => {
+              const trimmed = prev.trim();
+              return trimmed ? trimmed + ' ' + word : word;
+            });
+            wordIndex++;
+          } else if (typewriterIntervalRef.current) {
+            clearInterval(typewriterIntervalRef.current);
+            typewriterIntervalRef.current = null;
+            isPlayingRef.current = false;
+            currentAudioSourceRef.current = null;
+            if (audioQueueRef.current.length === 0) {
+              checkAiFinishedAndResume();
+            } else {
+              playNextAudio();
+            }
+          }
+        }, timePerWord);
+        return;
+      }
+
       // Decode the MP3 array buffer from OpenAI
       // Cast it back to ArrayBuffer before decoding
-      const audioBuffer = await audioCtx.decodeAudioData(audioData.buffer as unknown as ArrayBuffer);
+      const audioBuffer = await audioCtx.decodeAudioData(audioData.buffer);
+      if (audioData.responseId !== activeResponseIdRef.current) {
+        isPlayingRef.current = false;
+        playNextAudio();
+        return;
+      }
       
       // 🛑 Teleprompter effect: Type out the sentence while audio plays
       const words = audioData.text.split(' ');
@@ -221,6 +327,13 @@ function App() {
       if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
       
       typewriterIntervalRef.current = window.setInterval(() => {
+        if (audioData.responseId !== activeResponseIdRef.current) {
+          if (typewriterIntervalRef.current) {
+            clearInterval(typewriterIntervalRef.current);
+            typewriterIntervalRef.current = null;
+          }
+          return;
+        }
         if (wordIndex < words.length) {
           const word = words[wordIndex];
           setAiResponse(prev => {
@@ -242,6 +355,12 @@ function App() {
       currentAudioSourceRef.current = source;
       
       source.onended = () => {
+        if (audioData.responseId !== activeResponseIdRef.current) {
+          currentAudioSourceRef.current = null;
+          isPlayingRef.current = false;
+          return;
+        }
+
         // Ensure all words are fully displayed if audio finishes before typewriter
         if (typewriterIntervalRef.current) {
           clearInterval(typewriterIntervalRef.current);
@@ -296,19 +415,27 @@ function App() {
           
         case 'SENTENCE_READY':
           console.log('[LLM Sentence Ready for TTS]:', payload);
-          // 🛑 2. Use Cloud TTS (OpenAI) instead of local Kokoro for ultra-low latency
-          synthesizeWithOpenAI(payload);
+          if (payload.responseId !== activeResponseIdRef.current) {
+            break;
+          }
+          synthesizeWithOpenAI(payload.text, payload.responseId, currentSentenceIndexRef.current);
+          currentSentenceIndexRef.current += 1;
           break;
           
         case 'STREAM_END':
           console.log('[LLM Stream End]');
+          if (payload?.responseId !== activeResponseIdRef.current) {
+            break;
+          }
           isLlmStreamingRef.current = false;
           checkAiFinishedAndResume();
           break;
           
         case 'ERROR':
           console.error('[LLM Worker Error]:', payload);
-          setStatus(`LLM Error: ${payload}`);
+          if (!payload?.responseId || payload.responseId === activeResponseIdRef.current) {
+            setStatus(`LLM Error: ${payload.message ?? payload}`);
+          }
           break;
           
         default:
@@ -329,6 +456,14 @@ function App() {
       llmWorkerRef.current?.terminate();
     };
   }, []);
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    isAiSpeakingRef.current = isAiSpeaking;
+  }, [isAiSpeaking]);
 
   const handleMicClick = async () => {
     triggerHaptic('medium');
@@ -355,8 +490,6 @@ function App() {
     interruptAi(); // STOP AI IMMEDIATELY WHEN LISTENING STARTS
 
     try {
-      setTranscript(''); // Clear previous transcript
-      setAiResponse('');
       setStatus('Listening...');
       setIsListening(true);
       hasSpokenRef.current = false;
