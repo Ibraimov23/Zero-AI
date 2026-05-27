@@ -37,6 +37,7 @@ function App() {
         setTranscript(data.text);
         setStatus('Reasoning (Gemini 2.5 Flash)...');
         setAiResponse('');
+        isLlmStreamingRef.current = true;
         llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: data.text } });
       }
     } catch (error) {
@@ -47,6 +48,7 @@ function App() {
   // OpenAI TTS integration
   const synthesizeWithOpenAI = async (text: string) => {
     if (!text.trim()) return;
+    pendingTtsRequestsRef.current++;
     try {
       const response = await fetch('/api/tts', {
         method: 'POST',
@@ -64,6 +66,9 @@ function App() {
       playNextAudio();
     } catch (error) {
       console.error('TTS Error:', error);
+    } finally {
+      pendingTtsRequestsRef.current--;
+      checkAiFinishedAndResume();
     }
   };
 
@@ -100,9 +105,32 @@ function App() {
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
+  
+  // NEW: Ref to track if LLM is still streaming and pending TTS requests
+  const isLlmStreamingRef = useRef<boolean>(false);
+  const pendingTtsRequestsRef = useRef<number>(0);
+
+  // Helper to check if AI is completely finished and we should resume listening
+  const checkAiFinishedAndResume = () => {
+    if (!isLlmStreamingRef.current && pendingTtsRequestsRef.current === 0 && audioQueueRef.current.length === 0 && !isPlayingRef.current) {
+      setIsAiSpeaking(false);
+      setIsThinking(false);
+      
+      // Wait 1.2 seconds for a calm, natural pause before listening again
+      if (isSessionActiveRef.current && !isListening) {
+        setTimeout(() => {
+          if (isSessionActiveRef.current && !isListening && !isPlayingRef.current) {
+            startListening();
+          }
+        }, 1200);
+      }
+    }
+  };
 
   // Interrupt AI playback and generation
   const interruptAi = () => {
+    isLlmStreamingRef.current = false;
+    pendingTtsRequestsRef.current = 0;
     if (typewriterIntervalRef.current) {
       clearInterval(typewriterIntervalRef.current);
       typewriterIntervalRef.current = null;
@@ -125,13 +153,7 @@ function App() {
   const playNextAudio = async () => {
     if (isPlayingRef.current || audioQueueRef.current.length === 0) {
       if (audioQueueRef.current.length === 0 && !isPlayingRef.current) {
-        setIsAiSpeaking(false);
-        // Automatically restart listening if session is still active!
-        if (isSessionActiveRef.current && !isListening) {
-          setTimeout(() => {
-            if (isSessionActiveRef.current) startListening();
-          }, 600); // Short pause before mic re-opens
-        }
+        checkAiFinishedAndResume();
       }
       return;
     }
@@ -193,13 +215,7 @@ function App() {
         currentAudioSourceRef.current = null;
         isPlayingRef.current = false;
         if (audioQueueRef.current.length === 0) {
-          setIsAiSpeaking(false);
-          // Automatically restart listening if session is still active!
-          if (isSessionActiveRef.current) {
-            setTimeout(() => {
-              if (isSessionActiveRef.current) startListening();
-            }, 600);
-          }
+          checkAiFinishedAndResume();
         } else {
           playNextAudio();
         }
@@ -241,7 +257,9 @@ function App() {
           
         case 'STREAM_END':
           console.log('[LLM Stream End]');
+          isLlmStreamingRef.current = false;
           setStatus('Waiting for next interaction');
+          checkAiFinishedAndResume();
           break;
           
         case 'ERROR':
