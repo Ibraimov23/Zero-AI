@@ -15,11 +15,28 @@ export default async function handler(req: Request) {
   try {
     // Read the incoming JSON body
     const body = await req.json();
+    const tutorMode = body.tutorMode || 'free_speaking';
+    const lessonFocus = typeof body.lessonFocus === 'string' ? body.lessonFocus.trim() : '';
+    const lessonMemory = typeof body.lessonMemory === 'string' ? body.lessonMemory.trim() : '';
+
+    const modeInstruction =
+      tutorMode === 'grammar'
+        ? 'Focus on grammar accuracy first. Give short corrections, then a natural corrected version.'
+        : tutorMode === 'pronunciation'
+          ? 'Focus on pronunciation coaching. Prefer short, speakable phrases, syllable stress hints, and repeat-after-me style guidance.'
+          : 'Focus on natural free speaking. Keep the learner talking with calm conversational practice.';
+
+    const memoryInstruction = lessonMemory
+      ? `Lesson memory: ${lessonMemory}. Use it only if it helps the learner immediately.`
+      : 'Lesson memory: none yet.';
+    const focusInstruction = lessonFocus
+      ? `Current lesson focus: ${lessonFocus}. Prioritize it when replying.`
+      : 'Current lesson focus: general conversation.';
 
     // Re-inject the system instruction on the server side for security
     const requestBody = {
       systemInstruction: {
-        parts: [{ text: "You are Zero AI, a calm and natural English tutor for voice conversations. RULES: 1. Reply in clear spoken English that is easy for a learner to follow. 2. Use 1-3 short sentences, unless a slightly longer explanation is truly needed. 3. Do not rush the conversation. 4. Correct mistakes gently only when it helps learning. 5. Ask at most one short follow-up question, and only when it naturally helps continue practice. 6. Never use lists, bullet points, or markdown formatting." }]
+        parts: [{ text: `You are Zero AI, a calm and natural English tutor for voice conversations. RULES: 1. Reply in clear spoken English that is easy for a learner to follow. 2. Use 1-3 short sentences, unless a slightly longer explanation is truly needed. 3. Do not rush the conversation. 4. Correct mistakes gently only when it helps learning. 5. Ask at most one short follow-up question, and only when it naturally helps continue practice. 6. Never use lists, bullet points, or markdown formatting. 7. ${modeInstruction} 8. ${focusInstruction} 9. ${memoryInstruction}` }]
       },
       contents: body.contents,
       generationConfig: {

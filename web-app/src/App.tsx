@@ -1,6 +1,40 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import './App.css';
 
+type TutorMode = 'grammar' | 'pronunciation' | 'free_speaking';
+
+interface SessionMetrics {
+  tutorMode: TutorMode;
+  lessonFocus: string;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+  tokenBudget: number;
+  memoryItems: number;
+}
+
+const DEFAULT_SESSION_METRICS: SessionMetrics = {
+  tutorMode: 'free_speaking',
+  lessonFocus: 'general conversation',
+  estimatedInputTokens: 0,
+  estimatedOutputTokens: 0,
+  estimatedTotalTokens: 0,
+  tokenBudget: 1800,
+  memoryItems: 0,
+};
+
+const TUTOR_MODE_OPTIONS: Array<{ value: TutorMode; label: string; hint: string }> = [
+  { value: 'grammar', label: 'Grammar', hint: 'Fix grammar and explain clearly' },
+  { value: 'pronunciation', label: 'Pronunciation', hint: 'Short speaking drills and sound corrections' },
+  { value: 'free_speaking', label: 'Free Speaking', hint: 'Natural conversation practice' },
+];
+
+const LESSON_FOCUS_OPTIONS: Record<TutorMode, string[]> = {
+  grammar: ['past tense', 'articles', 'prepositions', 'sentence order'],
+  pronunciation: ['th sound', 'word stress', 'sentence rhythm', 'minimal pairs'],
+  free_speaking: ['IELTS speaking', 'job interview', 'daily conversation', 'travel English'],
+};
+
 function App() {
   const [status, setStatus] = useState<string>('Initializing...');
   const [isReady, setIsReady] = useState(false);
@@ -10,6 +44,9 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
+  const [tutorMode, setTutorMode] = useState<TutorMode>('free_speaking');
+  const [lessonFocus, setLessonFocus] = useState<string>('general conversation');
+  const [sessionMetrics, setSessionMetrics] = useState<SessionMetrics>(DEFAULT_SESSION_METRICS);
   
   const llmWorkerRef = useRef<Worker | null>(null);
 
@@ -412,6 +449,12 @@ function App() {
           // We ignore TEXT_CHUNK in the UI now, because we stream it via the teleprompter 
           // synchronized with audio in `playNextAudio`.
           break;
+
+        case 'SESSION_METRICS':
+          setSessionMetrics(payload);
+          setTutorMode(payload.tutorMode);
+          setLessonFocus(payload.lessonFocus);
+          break;
           
         case 'SENTENCE_READY':
           console.log('[LLM Sentence Ready for TTS]:', payload);
@@ -464,6 +507,35 @@ function App() {
   useEffect(() => {
     isAiSpeakingRef.current = isAiSpeaking;
   }, [isAiSpeaking]);
+
+  const getDefaultLessonFocus = (mode: TutorMode) => LESSON_FOCUS_OPTIONS[mode][0];
+
+  const handleTutorModeChange = (mode: TutorMode) => {
+    const nextFocus = getDefaultLessonFocus(mode);
+    setTutorMode(mode);
+    setLessonFocus(nextFocus);
+    llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode, lessonFocus: nextFocus } });
+  };
+
+  const handleLessonFocusChange = (focus: string) => {
+    setLessonFocus(focus);
+    llmWorkerRef.current?.postMessage({ type: 'SET_LESSON_FOCUS', payload: { lessonFocus: focus } });
+  };
+
+  const handleBudgetReset = () => {
+    llmWorkerRef.current?.postMessage({ type: 'RESET_SESSION_BUDGET' });
+    setSessionMetrics(prev => ({
+      ...prev,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      estimatedTotalTokens: 0,
+      memoryItems: 0,
+    }));
+  };
+
+  const handleCompressMemory = () => {
+    llmWorkerRef.current?.postMessage({ type: 'COMPRESS_HISTORY' });
+  };
 
   const handleMicClick = async () => {
     triggerHaptic('medium');
@@ -671,6 +743,10 @@ function App() {
   }, []);
 
   const isBusy = isListening || isAiSpeaking || isThinking;
+  const budgetProgress = Math.min(100, Math.round((sessionMetrics.estimatedTotalTokens / sessionMetrics.tokenBudget) * 100));
+  const showBudgetWarning = budgetProgress >= 75;
+  const isBudgetCritical = budgetProgress >= 90;
+  const currentFocusOptions = LESSON_FOCUS_OPTIONS[tutorMode];
 
   return (
     <div className="app-container">
@@ -692,6 +768,36 @@ function App() {
         ))}
       </div>
 
+      <div className="top-tags tutor-mode-row">
+        {TUTOR_MODE_OPTIONS.map(option => (
+          <button
+            key={option.value}
+            className={`tag tutor-tag ${tutorMode === option.value ? 'active' : ''}`}
+            onClick={() => handleTutorModeChange(option.value)}
+            type="button"
+            disabled={isThinking}
+            title={option.hint}
+          >
+            <span>{option.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="top-tags lesson-focus-row">
+        {currentFocusOptions.map(focus => (
+          <button
+            key={focus}
+            className={`tag tutor-tag subgoal-tag ${lessonFocus === focus ? 'active' : ''}`}
+            onClick={() => handleLessonFocusChange(focus)}
+            type="button"
+            disabled={isThinking}
+            title={focus}
+          >
+            <span>{focus}</span>
+          </button>
+        ))}
+      </div>
+
       {/* Greeting and Status Header */}
       <div className="status-header">
         <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
@@ -699,6 +805,38 @@ function App() {
           {isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
         </div>
         <div className="status-text">{status}</div>
+        <div className="session-panel">
+          <div className="session-meta">
+            <span>{TUTOR_MODE_OPTIONS.find(option => option.value === sessionMetrics.tutorMode)?.label ?? 'Free Speaking'}</span>
+            <span>{sessionMetrics.lessonFocus}</span>
+            <span>{sessionMetrics.estimatedTotalTokens}/{sessionMetrics.tokenBudget} tokens</span>
+            <span>{sessionMetrics.memoryItems} memory</span>
+          </div>
+          <div className="budget-bar">
+            <div className="budget-fill" style={{ width: `${budgetProgress}%` }} />
+          </div>
+          {showBudgetWarning ? (
+            <div className={`budget-warning ${isBudgetCritical ? 'critical' : ''}`}>
+              <div className="budget-warning-text">
+                {isBudgetCritical
+                  ? 'Session budget is very high. Reset now or compress memory to save tokens.'
+                  : 'Session budget reached 75%. You can compress memory or reset the session to save tokens.'}
+              </div>
+              <div className="budget-warning-actions">
+                <button className="secondary-action-button" type="button" onClick={handleCompressMemory}>
+                  Compress Memory
+                </button>
+                <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
+                  Reset Session
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
+              Reset Session
+            </button>
+          )}
+        </div>
       </div>
       
       <div className={`orb-container ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''}`}>
