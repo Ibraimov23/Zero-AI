@@ -77,6 +77,17 @@ function App() {
   const hasSpokenRef = useRef<boolean>(false);
   const silenceStartRef = useRef<number | null>(null);
   const shouldProcessAudioRef = useRef<boolean>(false); // to prevent processing on forced stop
+  const audioVolumeRef = useRef<number>(1); // To store current audio volume for visualizer
+  const requestRef = useRef<number>(0);
+
+  // Utility: Trigger Haptic Feedback (vibration on mobile)
+  const triggerHaptic = (type: 'light' | 'medium' | 'heavy' = 'light') => {
+    if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+      if (type === 'light') navigator.vibrate(10);
+      else if (type === 'medium') navigator.vibrate(20);
+      else navigator.vibrate([20, 30, 20]); // Double pulse
+    }
+  };
 
   // Keep a mutable ref of session active state for use in callbacks
   const isSessionActiveRef = useRef<boolean>(false);
@@ -223,6 +234,7 @@ function App() {
   }, []);
 
   const toggleSession = async () => {
+    triggerHaptic('light'); // Light feedback on user tap
     if (isSessionActive) {
       // Stop completely
       setIsSessionActive(false);
@@ -324,6 +336,16 @@ function App() {
         const sum = dataArray.reduce((a, b) => a + b, 0);
         const avg = sum / dataArray.length;
 
+        // Update volume for visualizer (mapping 0-255 to a 1.0 - 1.5 scale)
+        const normalizedVolume = 1 + (avg / 255) * 0.8;
+        audioVolumeRef.current = normalizedVolume;
+
+        // Force React to re-render the sphere scale only (using a CSS variable directly on the DOM node for performance)
+        const sphereEl = document.querySelector('.orb') as HTMLElement | null;
+        if (sphereEl) {
+          sphereEl.style.transform = `scale(${normalizedVolume})`;
+        }
+
         // VAD Logic
         if (avg > 10) { 
           // Volume threshold exceeded (User is speaking)
@@ -336,6 +358,7 @@ function App() {
           } else if (Date.now() - silenceStartRef.current > 800) { 
             // 800ms of silence detected (Fast Mobile Response!)
             console.log('Silence detected! Stopping mic to process...');
+            triggerHaptic('heavy'); // Heavy feedback when AI takes over
             stopListening(true);
             return;
           }
@@ -428,7 +451,7 @@ function App() {
       <div className="text-container">
         {transcript && !isListening && (
           <div className="user-text" style={{ color: '#94a3b8', marginBottom: '1rem', fontSize: '0.9rem' }}>
-            "{transcript}"
+            {transcript}
           </div>
         )}
         <div className="ai-text">
