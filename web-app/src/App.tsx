@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo, type CSSProperties } from 'react';
 import './App.css';
 
 type TutorMode = 'grammar' | 'free_speaking';
@@ -814,13 +814,18 @@ function App() {
 
   // Generate random particles for background
   const particles = useMemo(() => {
-    return Array.from({ length: 25 }).map((_, i) => ({
+    return Array.from({ length: 42 }).map((_, i) => ({
       id: i,
       left: `${Math.random() * 100}%`,
       top: `${Math.random() * 100}%`,
-      delay: `${Math.random() * 5}s`,
-      duration: `${10 + Math.random() * 15}s`,
-      size: `${1 + Math.random() * 3}px`
+      delay: `${Math.random() * 6}s`,
+      duration: `${9 + Math.random() * 16}s`,
+      size: `${1.8 + Math.random() * 4.6}px`,
+      opacity: `${0.28 + Math.random() * 0.48}`,
+      glow: `${8 + Math.random() * 18}px`,
+      blur: `${Math.random() * 1.5}px`,
+      drift: `${-16 + Math.random() * 32}px`,
+      tint: Math.random() > 0.62 ? 'rgba(216, 180, 254, 0.95)' : Math.random() > 0.35 ? 'rgba(125, 211, 252, 0.9)' : 'rgba(255, 255, 255, 0.95)'
     }));
   }, []);
 
@@ -838,17 +843,22 @@ function App() {
       {/* Background Particles */}
       <div className="particles-layer">
         {particles.map(p => (
-          <div 
-            key={p.id} 
-            className="particle" 
-            style={{ 
-              left: p.left, 
-              top: p.top, 
-              animationDelay: p.delay, 
+          <div
+            key={p.id}
+            className="particle"
+            style={{
+              left: p.left,
+              top: p.top,
+              animationDelay: p.delay,
               animationDuration: p.duration,
               width: p.size,
-              height: p.size
-            }}
+              height: p.size,
+              opacity: p.opacity,
+              '--particle-glow': p.glow,
+              '--particle-blur': p.blur,
+              '--particle-drift': p.drift,
+              '--particle-color': p.tint,
+            } as CSSProperties}
           />
         ))}
       </div>
