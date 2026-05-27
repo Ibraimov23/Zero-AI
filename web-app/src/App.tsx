@@ -14,6 +14,37 @@ function App() {
   const gpuWorkerRef = useRef<Worker | null>(null);
   const llmWorkerRef = useRef<Worker | null>(null);
 
+  // OpenAI Whisper STT Integration (Cloud - Ultra Fast)
+  const transcribeWithOpenAI = async (blob: Blob) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', blob, 'audio.webm');
+      formData.append('model', 'whisper-1');
+      formData.append('language', 'en'); // Force English for speed
+
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error(`OpenAI STT Error: ${response.statusText}`);
+      
+      const data = await response.json();
+      if (data.text) {
+        console.log('[Cloud STT Transcript]:', data.text);
+        setTranscript(data.text);
+        setStatus('Reasoning (Gemini 2.5 Flash)...');
+        setAiResponse('');
+        llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: data.text } });
+      }
+    } catch (error) {
+      console.error('Cloud STT Error:', error);
+      setStatus('Error: Cloud STT Failed');
+    }
+  };
   // OpenAI TTS integration
   const synthesizeWithOpenAI = async (text: string) => {
     if (!text.trim()) return;
@@ -298,43 +329,14 @@ function App() {
           return; // Discard audio if stopped forcefully
         }
 
-        setStatus('Processing audio (Resampling)...');
+        setStatus('Sending to OpenAI STT...');
         
         try {
           const blob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
-          const arrayBuffer = await blob.arrayBuffer();
           
-          // Initialize AudioContext inside user gesture
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-          const audioContext = new AudioContextClass();
+          // FAST CLOUD STT: Send blob directly to OpenAI
+          transcribeWithOpenAI(blob);
           
-          const decodedAudio = await audioContext.decodeAudioData(arrayBuffer);
-
-          // Whisper requires 16000Hz mono audio
-          const offlineContext = new OfflineAudioContext(
-            1, // Mono channel
-            decodedAudio.duration * 16000, // Total frames
-            16000 // Sample rate
-          );
-          
-          const source = offlineContext.createBufferSource();
-          source.buffer = decodedAudio;
-          source.connect(offlineContext.destination);
-          source.start(0);
-
-          const renderedBuffer = await offlineContext.startRendering();
-          const float32Array = renderedBuffer.getChannelData(0); // Get mono channel
-          
-          // Send to GPU Worker via Transferable Objects
-          const buffer = float32Array.buffer;
-          setStatus('Sending to AI Core for transcription...');
-          gpuWorkerRef.current?.postMessage(
-            { type: 'PROCESS_AUDIO', payload: buffer },
-            [buffer]
-          );
-          
-          // Cleanup
-          audioContext.close();
         } catch (error) {
           console.error('Audio processing error:', error);
           setStatus('Error: Failed to process audio');
