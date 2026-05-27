@@ -19,6 +19,20 @@ const state = {
   isAborted: false,
 };
 
+// ==========================================
+// NEW: Sliding Window Context Management
+// Prevents context overflow and memory leaks
+// ==========================================
+const MAX_CONTEXT_MESSAGES = 10;
+
+function trimContextWindow() {
+  // Keep the System Instruction (index 0)
+  // If we exceed the limit, remove the oldest User/Model pair (index 1 and 2)
+  if (state.messages.length > MAX_CONTEXT_MESSAGES + 1) {
+    state.messages.splice(1, 2);
+  }
+}
+
 // System instruction for the English Mentor persona
 const SYSTEM_INSTRUCTION = {
   parts: [
@@ -36,10 +50,9 @@ RULES:
 // ==========================================
 // 2. Sentence Splitter (Buffering)
 // ==========================================
-// Matches sentence endings: ., ?, !, ,, :, or newline, followed by a space or end of string
-// 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Нарезка теперь идет и по запятым (,), и по двоеточиям (:)
-// Это заставляет TTS начинать озвучивать короткие куски мгновенно, не дожидаясь конца предложения
-const SENTENCE_BOUNDARY_REGEX = /([.!?,:\n]+(?:\s+|$))/;
+// Matches sentence endings: ., ?, !, followed by a space or end of string
+// 🛑 ПРИЧИНА 5 ИСПРАВЛЕНА: Убрали запятые (,) из сплиттера, чтобы TTS не заикался на коротких кусках
+const SENTENCE_BOUNDARY_REGEX = /([.?!]+(?:\s+|$))/;
 
 class SentenceSplitter {
   private buffer = '';
@@ -84,6 +97,9 @@ async function generateResponse(userText: string) {
 
   // Update history with user's message
   state.messages.push({ role: 'user', parts: [{ text: userText }] });
+
+  // Trim context to prevent overflow
+  trimContextWindow();
 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${state.apiKey}`;

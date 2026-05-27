@@ -10,8 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
-    "kokoro-js": "^1.2.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

@@ -11,7 +11,6 @@ function App() {
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
   
-  const gpuWorkerRef = useRef<Worker | null>(null);
   const llmWorkerRef = useRef<Worker | null>(null);
 
   // OpenAI Whisper STT Integration (Cloud - Ultra Fast)
@@ -177,51 +176,8 @@ function App() {
   };
 
   useEffect(() => {
-    // Initialize Web Workers as ECMAScript modules
-    gpuWorkerRef.current = new Worker(new URL('./workers/gpu.worker.ts', import.meta.url), { type: 'module' });
+    // Initialize Web Worker for LLM
     llmWorkerRef.current = new Worker(new URL('./workers/llm.worker.ts', import.meta.url), { type: 'module' });
-
-    // Handle messages from GPU Worker
-    gpuWorkerRef.current.onmessage = (e: MessageEvent) => {
-      const { type, payload } = e.data;
-      
-      switch (type) {
-        case 'STATUS':
-          console.log('[GPU Worker Status]:', payload);
-          setStatus(payload);
-          break;
-          
-        case 'READY':
-          console.log('[GPU Worker Ready]:', payload);
-          setStatus(`Ready (Zero Lag UI) - Device: ${payload.device}`);
-          setIsReady(true);
-          break;
-          
-        case 'TRANSCRIPT_SUCCESS':
-          console.log('[GPU Worker Transcript]:', payload);
-          setTranscript(payload);
-          setStatus('Reasoning (Gemini 2.5 Flash)...');
-          setAiResponse(''); // Clear previous AI response
-          // Forward to LLM worker
-          llmWorkerRef.current?.postMessage({ type: 'GENERATE_RESPONSE', payload: { prompt: payload } });
-          break;
-          
-        case 'AUDIO_CHUNK_READY':
-          // Legacy support if Kokoro is still used
-          if (payload instanceof ArrayBuffer) {
-            // We ignore local Kokoro audio now to prevent duplicate playback
-          }
-          break;
-          
-        case 'ERROR':
-          console.error('[GPU Worker Error]:', payload);
-          setStatus(`Error: ${payload}`);
-          break;
-          
-        default:
-          console.log('Unknown message from GPU Worker:', e.data);
-      }
-    };
 
     // Handle messages from LLM Worker
     llmWorkerRef.current.onmessage = (e: MessageEvent) => {
@@ -230,6 +186,8 @@ function App() {
       switch (type) {
         case 'LLM_READY':
           console.log('[LLM Worker Ready]');
+          setStatus('Ready (Zero Lag UI) - Connected to Cloud AI');
+          setIsReady(true);
           break;
           
         case 'TEXT_CHUNK':
@@ -244,7 +202,7 @@ function App() {
           
         case 'STREAM_END':
           console.log('[LLM Stream End]');
-          setStatus('Ready (Zero Lag UI) - Waiting for next interaction');
+          setStatus('Waiting for next interaction');
           break;
           
         case 'ERROR':
@@ -257,8 +215,7 @@ function App() {
       }
     };
 
-    // Send the starting signal to build the local AI Core
-    gpuWorkerRef.current.postMessage({ type: 'INIT_MODELS' });
+    // Send the starting signal to check LLM API
     llmWorkerRef.current.postMessage({ type: 'INIT_LLM' });
 
     // Cleanup workers on unmount
@@ -268,7 +225,6 @@ function App() {
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(track => track.stop());
       }
-      gpuWorkerRef.current?.terminate();
       llmWorkerRef.current?.terminate();
     };
   }, []);
@@ -301,6 +257,20 @@ function App() {
       hasSpokenRef.current = false;
       silenceStartRef.current = null;
       shouldProcessAudioRef.current = true;
+      
+      // 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Разблокировка AudioContext на iPhone (Safari)
+      // На iOS звук должен быть запущен в тот же момент, когда юзер кликнул по экрану
+      if (!playbackContextRef.current) {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        playbackContextRef.current = new AudioContextClass();
+        
+        // Play 1ms of silence to unlock the audio context
+        const silentBuffer = playbackContextRef.current.createBuffer(1, 1, 22050);
+        const source = playbackContextRef.current.createBufferSource();
+        source.buffer = silentBuffer;
+        source.connect(playbackContextRef.current.destination);
+        source.start(0);
+      }
       
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
