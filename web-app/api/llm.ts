@@ -22,9 +22,7 @@ export default async function handler(req: Request) {
     const modeInstruction =
       tutorMode === 'grammar'
         ? 'Focus on grammar accuracy first. Give short corrections, then a natural corrected version.'
-        : tutorMode === 'pronunciation'
-          ? 'Focus on pronunciation coaching. Prefer short, speakable phrases, syllable stress hints, and repeat-after-me style guidance.'
-          : 'Focus on natural free speaking. Keep the learner talking with calm conversational practice.';
+        : 'Focus on natural free speaking. Keep the learner talking with calm conversational practice.';
 
     const memoryInstruction = lessonMemory
       ? `Lesson memory: ${lessonMemory}. Use it only if it helps the learner immediately.`
@@ -36,12 +34,12 @@ export default async function handler(req: Request) {
     // Re-inject the system instruction on the server side for security
     const requestBody = {
       systemInstruction: {
-        parts: [{ text: `You are Zero AI, a calm and natural English tutor for voice conversations. RULES: 1. Reply in clear spoken English that is easy for a learner to follow. 2. Use 1-3 short sentences, unless a slightly longer explanation is truly needed. 3. Do not rush the conversation. 4. Correct mistakes gently only when it helps learning. 5. Ask at most one short follow-up question, and only when it naturally helps continue practice. 6. Never use lists, bullet points, or markdown formatting. 7. ${modeInstruction} 8. ${focusInstruction} 9. ${memoryInstruction}` }]
+        parts: [{ text: `You are Zero AI, a calm and natural English tutor for voice conversations. RULES: 1. Reply in clear spoken English that is easy for a learner to follow. 2. Keep answers concise, but always finish the thought naturally before stopping. 3. Do not rush the conversation or jump to a new topic before closing the current reply. 4. Correct mistakes gently only when it helps learning, and keep the correction very short. 5. Ask at most one short follow-up question, and only when it naturally helps continue practice. 6. Prefer a warm phone-call rhythm: calm, clear, and human. 7. Never use lists, bullet points, or markdown formatting. 8. ${modeInstruction} 9. ${focusInstruction} 10. ${memoryInstruction}` }]
       },
       contents: body.contents,
       generationConfig: {
         temperature: 0.4, // More stable and tutor-like, with fewer rambly responses
-        maxOutputTokens: 180, // Enough to finish a thought without wasting tokens
+        maxOutputTokens: 220, // Enough to finish a thought calmly without wasting tokens
         topK: 1, // Faster sampling
         stopSequences: ["\n\n", "User:"], // Stops generation immediately if it tries to hallucinate a dialogue or write paragraphs
       }

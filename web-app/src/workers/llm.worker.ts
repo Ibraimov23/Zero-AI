@@ -9,7 +9,7 @@ interface ChatMessage {
   parts: Array<{ text: string }>;
 }
 
-type TutorMode = 'grammar' | 'pronunciation' | 'free_speaking';
+type TutorMode = 'grammar' | 'free_speaking';
 
 interface SessionMetrics {
   tutorMode: TutorMode;
@@ -23,7 +23,6 @@ interface SessionMetrics {
 
 const DEFAULT_FOCUS: Record<TutorMode, string> = {
   grammar: 'general grammar',
-  pronunciation: 'natural pronunciation',
   free_speaking: 'general conversation',
 };
 
@@ -182,6 +181,48 @@ class SentenceSplitter {
   }
 }
 
+function extractSseEvents(buffer: string) {
+  const normalizedBuffer = buffer.replace(/\r\n/g, '\n');
+  const events: string[] = [];
+  let searchIndex = normalizedBuffer.indexOf('\n\n');
+  let lastIndex = 0;
+
+  while (searchIndex !== -1) {
+    events.push(normalizedBuffer.slice(lastIndex, searchIndex));
+    lastIndex = searchIndex + 2;
+    searchIndex = normalizedBuffer.indexOf('\n\n', lastIndex);
+  }
+
+  return {
+    events,
+    remaining: normalizedBuffer.slice(lastIndex),
+  };
+}
+
+function parseSseEvent(eventBlock: string) {
+  const dataLines = eventBlock
+    .split('\n')
+    .filter(line => line.startsWith('data:'))
+    .map(line => line.slice(5).trimStart())
+    .filter(Boolean);
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  const dataStr = dataLines.join('\n');
+  if (dataStr === '[DONE]') {
+    return null;
+  }
+
+  try {
+    return JSON.parse(dataStr);
+  } catch (error) {
+    console.warn('Error parsing SSE event:', error, dataStr);
+    return null;
+  }
+}
+
 // ==========================================
 // 3. Gemini API Integration (Streaming)
 // ==========================================
@@ -224,42 +265,57 @@ async function generateResponse(userText: string, responseId: number) {
     
     let aiFullResponse = '';
 
+    let sseBuffer = '';
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n');
+      if (state.isAborted) {
+        await reader.cancel();
+        rollbackPendingUserTurn();
+        return;
+      }
 
-      for (const line of lines) {
-          if (state.isAborted) {
-            reader.cancel();
-            rollbackPendingUserTurn();
-            return;
-          }
+      sseBuffer += decoder.decode(value, { stream: true });
+      const { events, remaining } = extractSseEvents(sseBuffer);
+      sseBuffer = remaining;
 
-          if (line.startsWith('data: ')) {
-          const dataStr = line.substring(6);
-          if (dataStr === '[DONE]') continue;
-          
-          try {
-            const data = JSON.parse(dataStr);
-            const textChunk = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            
-            if (textChunk) {
-              aiFullResponse += textChunk;
-              // Send raw chunk to UI for typewriter effect
-              self.postMessage({ type: 'TEXT_CHUNK', payload: { text: textChunk, responseId } });
-              
-              // Process through sentence splitter for TTS
-              splitter.processChunk(textChunk, (sentence) => {
-                self.postMessage({ type: 'SENTENCE_READY', payload: { text: sentence, responseId } });
-              });
-            }
-          } catch (e) {
-            console.warn('Error parsing SSE data line:', e);
-          }
+      for (const eventBlock of events) {
+        if (state.isAborted) {
+          await reader.cancel();
+          rollbackPendingUserTurn();
+          return;
         }
+
+        const data = parseSseEvent(eventBlock);
+        const textChunk = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+        if (textChunk) {
+          aiFullResponse += textChunk;
+          self.postMessage({ type: 'TEXT_CHUNK', payload: { text: textChunk, responseId } });
+
+          splitter.processChunk(textChunk, (sentence) => {
+            self.postMessage({ type: 'SENTENCE_READY', payload: { text: sentence, responseId } });
+          });
+        }
+      }
+    }
+
+    sseBuffer += decoder.decode();
+    const finalEvents = extractSseEvents(sseBuffer);
+    const trailingEvents = finalEvents.remaining.trim() ? [...finalEvents.events, finalEvents.remaining] : finalEvents.events;
+
+    for (const eventBlock of trailingEvents) {
+      const data = parseSseEvent(eventBlock);
+      const textChunk = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+      if (textChunk) {
+        aiFullResponse += textChunk;
+        self.postMessage({ type: 'TEXT_CHUNK', payload: { text: textChunk, responseId } });
+        splitter.processChunk(textChunk, (sentence) => {
+          self.postMessage({ type: 'SENTENCE_READY', payload: { text: sentence, responseId } });
+        });
       }
     }
 
@@ -308,7 +364,7 @@ self.addEventListener('message', async (event: MessageEvent) => {
       break;
 
     case 'SET_TUTOR_MODE':
-      if (payload.mode && payload.mode !== state.tutorMode) {
+      if (payload.mode) {
         compressHistoryIfNeeded();
         const nextMode = payload.mode as TutorMode;
         state.tutorMode = nextMode;

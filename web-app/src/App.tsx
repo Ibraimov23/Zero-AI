@@ -1,7 +1,57 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import './App.css';
 
-type TutorMode = 'grammar' | 'pronunciation' | 'free_speaking';
+type TutorMode = 'grammar' | 'free_speaking';
+
+const USER_END_OF_TURN_MS = 2200;
+const AI_TO_USER_RESUME_MS = 2000;
+const SHORT_VALID_UTTERANCE_MIN_MS = 420;
+const SUSTAINED_SPEECH_MIN_MS = 750;
+const SHORT_VALID_UTTERANCES = new Set([
+  'yes',
+  'no',
+  'okay',
+  'ok',
+  'hello',
+  'hi',
+  'thanks',
+  'sorry',
+  'sure',
+  'maybe',
+]);
+const NOISE_ONLY_UTTERANCES = new Set([
+  'uh',
+  'um',
+  'hmm',
+  'mm',
+  'ah',
+  'oh',
+  'eh',
+]);
+
+function getMeaningfulTokens(text: string) {
+  return text.toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) ?? [];
+}
+
+function isLikelyNoiseTranscript(text: string, speechDurationMs: number) {
+  const normalized = text.trim().toLowerCase();
+  const tokens = getMeaningfulTokens(normalized);
+
+  if (!normalized || tokens.length === 0) return true;
+  if (tokens.every(token => NOISE_ONLY_UTTERANCES.has(token))) return true;
+
+  if (tokens.length === 1) {
+    const [token] = tokens;
+    if (SHORT_VALID_UTTERANCES.has(token)) {
+      return speechDurationMs < SHORT_VALID_UTTERANCE_MIN_MS;
+    }
+
+    if (token.length <= 2) return true;
+    if (speechDurationMs < SUSTAINED_SPEECH_MIN_MS && token.length < 5) return true;
+  }
+
+  return false;
+}
 
 interface SessionMetrics {
   tutorMode: TutorMode;
@@ -25,14 +75,12 @@ const DEFAULT_SESSION_METRICS: SessionMetrics = {
 
 const TUTOR_MODE_OPTIONS: Array<{ value: TutorMode; label: string; hint: string }> = [
   { value: 'grammar', label: 'Grammar', hint: 'Fix grammar and explain clearly' },
-  { value: 'pronunciation', label: 'Pronunciation', hint: 'Short speaking drills and sound corrections' },
   { value: 'free_speaking', label: 'Free Speaking', hint: 'Natural conversation practice' },
 ];
 
 const LESSON_FOCUS_OPTIONS: Record<TutorMode, string[]> = {
   grammar: ['past tense', 'articles', 'prepositions', 'sentence order'],
-  pronunciation: ['th sound', 'word stress', 'sentence rhythm', 'minimal pairs'],
-  free_speaking: ['IELTS speaking', 'job interview', 'daily conversation', 'travel English'],
+  free_speaking: ['general conversation'],
 };
 
 function App() {
@@ -75,6 +123,8 @@ function App() {
         const text = data.text.trim();
         const lowerText = text.toLowerCase();
         
+        const speechDuration = lastSpeechDurationRef.current;
+
         // 🛑 Ignore known Whisper hallucinations on silence or short background noises
         if (
           !text || 
@@ -87,6 +137,16 @@ function App() {
           setStatus('Ready');
           setIsThinking(false);
           // Resume listening loop since this was a false alarm
+          if (isSessionActiveRef.current) {
+            checkAiFinishedAndResume();
+          }
+          return;
+        }
+
+        if (isLikelyNoiseTranscript(text, speechDuration)) {
+          console.log('[Cloud STT] Ignored likely noise / filler:', { text, speechDuration });
+          setStatus('Ready');
+          setIsThinking(false);
           if (isSessionActiveRef.current) {
             checkAiFinishedAndResume();
           }
@@ -192,6 +252,7 @@ function App() {
   const hasSpokenRef = useRef<boolean>(false);
   const silenceStartRef = useRef<number | null>(null);
   const speechStartRef = useRef<number | null>(null);
+  const lastSpeechDurationRef = useRef<number>(0);
   const shouldProcessAudioRef = useRef<boolean>(false); // to prevent processing on forced stop
   const audioVolumeRef = useRef<number>(1); // To store current audio volume for visualizer
 
@@ -230,7 +291,7 @@ function App() {
       
       if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
       
-      // 🛑 AUTO-RESUME: Wait 1.5 seconds for a natural pause before turning the mic back on
+      // Let the learner fully hear the ending before re-opening the mic.
       if (isSessionActiveRef.current && !isListeningRef.current) {
         resumeTimeoutRef.current = window.setTimeout(() => {
           if (
@@ -242,9 +303,9 @@ function App() {
             pendingTtsRequestsRef.current === 0 &&
             audioQueueRef.current.length === 0
           ) {
-            void startListening();
+            void startListening({ interruptCurrentAi: false });
           }
-        }, 1500);
+        }, AI_TO_USER_RESUME_MS);
       }
     }
   };
@@ -425,8 +486,15 @@ function App() {
       source.start(0);
     } catch (error) {
       console.error('Audio playback error:', error);
+      if (audioData.responseId === activeResponseIdRef.current && !audioData.textOnly) {
+        audioQueueRef.current.unshift({
+          ...audioData,
+          buffer: null,
+          textOnly: true,
+        });
+      }
       isPlayingRef.current = false;
-      playNextAudio(); // Skip to next if decoding fails
+      playNextAudio();
     }
   };
 
@@ -517,9 +585,10 @@ function App() {
     llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode, lessonFocus: nextFocus } });
   };
 
-  const handleLessonFocusChange = (focus: string) => {
-    setLessonFocus(focus);
-    llmWorkerRef.current?.postMessage({ type: 'SET_LESSON_FOCUS', payload: { lessonFocus: focus } });
+  const handleJobInterviewClick = () => {
+    setTutorMode('free_speaking');
+    setLessonFocus('Job interview');
+    llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode: 'free_speaking', lessonFocus: 'Job interview' } });
   };
 
   const handleBudgetReset = () => {
@@ -554,12 +623,18 @@ function App() {
     } else {
       // Start Listening
       isSessionActiveRef.current = true;
-      await startListening();
+      await startListening({ interruptCurrentAi: false });
     }
   };
 
-  const startListening = async () => {
-    interruptAi(); // STOP AI IMMEDIATELY WHEN LISTENING STARTS
+  const startListening = async (options?: { interruptCurrentAi?: boolean }) => {
+    const shouldInterruptCurrentAi = options?.interruptCurrentAi ?? true;
+    if (shouldInterruptCurrentAi) {
+      interruptAi();
+    } else if (resumeTimeoutRef.current) {
+      window.clearTimeout(resumeTimeoutRef.current);
+      resumeTimeoutRef.current = null;
+    }
 
     try {
       setStatus('Listening...');
@@ -567,6 +642,7 @@ function App() {
       hasSpokenRef.current = false;
       silenceStartRef.current = null;
       speechStartRef.current = null;
+      lastSpeechDurationRef.current = 0;
       shouldProcessAudioRef.current = true;
       
       // 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Разблокировка AudioContext на iPhone (Safari)
@@ -670,8 +746,8 @@ function App() {
             // User has spoken, now detecting silence
             if (!silenceStartRef.current) {
               silenceStartRef.current = Date.now();
-            } else if (Date.now() - silenceStartRef.current > 2000) { 
-              // 🛑 2.0s SILENCE DETECTED.
+            } else if (Date.now() - silenceStartRef.current > USER_END_OF_TURN_MS) { 
+              // A calm pause means the learner has likely finished this turn.
               // Now check if the user actually spoke a full sentence, or just sneezed/coughed.
               const speechDuration = silenceStartRef.current - (speechStartRef.current || 0);
               
@@ -683,6 +759,7 @@ function App() {
                 silenceStartRef.current = null;
               } else {
                 console.log(`[VAD] Valid speech detected (${speechDuration}ms). Stopping mic to process...`);
+                lastSpeechDurationRef.current = speechDuration;
                 triggerHaptic('heavy'); 
                 stopListening(true);
                 return;
@@ -704,6 +781,11 @@ function App() {
 
   const stopListening = (process: boolean) => {
     shouldProcessAudioRef.current = process;
+    if (process) {
+      const now = Date.now();
+      const speechStart = speechStartRef.current;
+      lastSpeechDurationRef.current = speechStart ? Math.max(0, now - speechStart) : lastSpeechDurationRef.current;
+    }
     
     if (vadFrameRef.current) {
       cancelAnimationFrame(vadFrameRef.current);
@@ -746,7 +828,6 @@ function App() {
   const budgetProgress = Math.min(100, Math.round((sessionMetrics.estimatedTotalTokens / sessionMetrics.tokenBudget) * 100));
   const showBudgetWarning = budgetProgress >= 75;
   const isBudgetCritical = budgetProgress >= 90;
-  const currentFocusOptions = LESSON_FOCUS_OPTIONS[tutorMode];
   const hasTranscript = Boolean(transcript && !isListening);
   const hasAiResponse = Boolean(aiResponse);
   const subtitleLayoutClass = hasTranscript && hasAiResponse ? 'dual-card' : hasTranscript || hasAiResponse ? 'single-card' : 'idle';
@@ -771,8 +852,10 @@ function App() {
           />
         ))}
       </div>
+      <div className="scene-ambient scene-ambient-primary" />
+      <div className="scene-ambient scene-ambient-secondary" />
 
-      <div className="hero-shell">
+      <div className="hero-shell scene-layer scene-layer-top">
         <div className="control-deck">
           <div className="top-tags tutor-mode-row">
             {TUTOR_MODE_OPTIONS.map(option => (
@@ -787,21 +870,15 @@ function App() {
                 <span>{option.label}</span>
               </button>
             ))}
-          </div>
-
-          <div className="top-tags lesson-focus-row">
-            {currentFocusOptions.map(focus => (
-              <button
-                key={focus}
-                className={`tag tutor-tag subgoal-tag ${lessonFocus === focus ? 'active' : ''}`}
-                onClick={() => handleLessonFocusChange(focus)}
-                type="button"
-                disabled={isThinking}
-                title={focus}
-              >
-                <span>{focus}</span>
-              </button>
-            ))}
+            <button
+              className={`tag tutor-tag subgoal-tag ${lessonFocus === 'Job interview' ? 'active' : ''}`}
+              onClick={handleJobInterviewClick}
+              type="button"
+              disabled={isThinking}
+              title="Job interview"
+            >
+              <span>Job interview</span>
+            </button>
           </div>
 
           {/* Greeting and Status Header */}
@@ -853,7 +930,7 @@ function App() {
         </div>
       </div>
       
-      <div className={`orb-container ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''}`}>
+      <div className={`orb-container scene-layer scene-layer-orb ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''}`}>
         <div className="orb">
           <div className="petal petal-1"></div>
           <div className="petal petal-2"></div>
@@ -864,7 +941,7 @@ function App() {
         </div>
       </div>
 
-      <div className={`text-container ${hasTranscript || hasAiResponse ? 'engaged' : ''} ${subtitleLayoutClass}`}>
+      <div className={`text-container subtitle-stage scene-layer scene-layer-subtitles ${hasTranscript || hasAiResponse ? 'engaged' : ''} ${subtitleLayoutClass}`}>
         {hasTranscript && (
           <div className="user-text transcript-card">
             <div className="text-label">You said</div>
@@ -877,7 +954,7 @@ function App() {
         </div>
       </div>
 
-      <div className="bottom-controls">
+      <div className="bottom-controls mic-zone scene-layer scene-layer-mic">
         <div className="mic-wrapper">
           {isListening && (
             <>
