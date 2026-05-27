@@ -22,7 +22,7 @@ export default async function handler(req: Request) {
       contents: body.contents,
       generationConfig: {
         temperature: 0.7, // A bit more creative but still focused
-        maxOutputTokens: 150, // INCREASED to prevent AI from cutting off its own sentences abruptly
+        maxOutputTokens: 500, // UNLIMITED: Let the AI finish its thought completely
         topK: 1, // Faster sampling
         stopSequences: ["\n\n", "User:"], // Stops generation immediately if it tries to hallucinate a dialogue or write paragraphs
       }

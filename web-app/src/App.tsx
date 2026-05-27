@@ -44,7 +44,12 @@ function App() {
           lowerText.includes('amara.org')
         ) {
           console.log('[Cloud STT] Ignored hallucination/silence:', text);
-          setStatus('Waiting for next interaction');
+          setStatus('Ready');
+          setIsThinking(false);
+          // Resume listening loop since this was a false alarm
+          if (isSessionActiveRef.current) {
+            checkAiFinishedAndResume();
+          }
           return;
         }
 
@@ -58,6 +63,8 @@ function App() {
     } catch (error) {
       console.error('Cloud STT Error:', error);
       setStatus('Error: Cloud STT Failed');
+      setIsThinking(false);
+      if (isSessionActiveRef.current) checkAiFinishedAndResume();
     }
   };
 
@@ -99,6 +106,7 @@ function App() {
   const vadFrameRef = useRef<number | null>(null);
   const hasSpokenRef = useRef<boolean>(false);
   const silenceStartRef = useRef<number | null>(null);
+  const speechStartRef = useRef<number | null>(null);
   const shouldProcessAudioRef = useRef<boolean>(false); // to prevent processing on forced stop
   const audioVolumeRef = useRef<number>(1); // To store current audio volume for visualizer
 
@@ -117,6 +125,8 @@ function App() {
   const playbackContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
+  const resumeTimeoutRef = useRef<number | null>(null);
+  const isSessionActiveRef = useRef<boolean>(false);
   
   // NEW: Ref to track if LLM is still streaming and pending TTS requests
   const isLlmStreamingRef = useRef<boolean>(false);
@@ -128,7 +138,17 @@ function App() {
       setIsAiSpeaking(false);
       setIsThinking(false);
       setStatus('Ready');
-      // 🛑 Auto-restart removed for manual control and reliability
+      
+      if (resumeTimeoutRef.current) window.clearTimeout(resumeTimeoutRef.current);
+      
+      // 🛑 AUTO-RESUME: Wait 1.5 seconds for a natural pause before turning the mic back on
+      if (isSessionActiveRef.current && !isListening) {
+        resumeTimeoutRef.current = window.setTimeout(() => {
+          if (isSessionActiveRef.current && !isListening && !isPlayingRef.current && !isAiSpeaking) {
+             startListening();
+          }
+        }, 1500);
+      }
     }
   };
 
@@ -139,6 +159,10 @@ function App() {
     if (typewriterIntervalRef.current) {
       clearInterval(typewriterIntervalRef.current);
       typewriterIntervalRef.current = null;
+    }
+    if (resumeTimeoutRef.current) {
+      window.clearTimeout(resumeTimeoutRef.current);
+      resumeTimeoutRef.current = null;
     }
     audioQueueRef.current = []; // Clear queue
     if (currentAudioSourceRef.current) {
@@ -196,13 +220,13 @@ function App() {
       
       if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
       
-      // Add space before new sentence if there's already text
-      setAiResponse(prev => prev ? prev + ' ' : '');
-      
       typewriterIntervalRef.current = window.setInterval(() => {
         if (wordIndex < words.length) {
           const word = words[wordIndex];
-          setAiResponse(prev => prev + (wordIndex === 0 ? '' : ' ') + word);
+          setAiResponse(prev => {
+            const trimmed = prev.trim();
+            return trimmed ? trimmed + ' ' + word : word;
+          });
           wordIndex++;
         } else {
           if (typewriterIntervalRef.current) {
@@ -218,6 +242,21 @@ function App() {
       currentAudioSourceRef.current = source;
       
       source.onended = () => {
+        // Ensure all words are fully displayed if audio finishes before typewriter
+        if (typewriterIntervalRef.current) {
+          clearInterval(typewriterIntervalRef.current);
+          typewriterIntervalRef.current = null;
+        }
+        
+        // Append any remaining words that the typewriter missed
+        if (wordIndex < words.length) {
+          const remainingWords = words.slice(wordIndex).join(' ');
+          setAiResponse(prev => {
+            const trimmed = prev.trim();
+            return trimmed ? trimmed + ' ' + remainingWords : remainingWords;
+          });
+        }
+        
         currentAudioSourceRef.current = null;
         isPlayingRef.current = false;
         if (audioQueueRef.current.length === 0) {
@@ -297,14 +336,17 @@ function App() {
     if (isListening) {
       // Manual Stop & Send
       console.log('[UI] Manual stop & process');
+      isSessionActiveRef.current = false; // Stop the continuous loop
       stopListening(true);
     } else if (isAiSpeaking || isThinking) {
       // Manual Interrupt
       console.log('[UI] Interrupting AI');
+      isSessionActiveRef.current = false; // Stop the continuous loop
       interruptAi();
       setStatus('Interrupted. Ready.');
     } else {
       // Start Listening
+      isSessionActiveRef.current = true;
       await startListening();
     }
   };
@@ -319,6 +361,7 @@ function App() {
       setIsListening(true);
       hasSpokenRef.current = false;
       silenceStartRef.current = null;
+      speechStartRef.current = null;
       shouldProcessAudioRef.current = true;
       
       // 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Разблокировка AudioContext на iPhone (Safari)
@@ -405,23 +448,41 @@ function App() {
         }
 
         // VAD Logic
-        if (avg > 18) { 
-          // Volume threshold exceeded (User is speaking)
-          hasSpokenRef.current = true;
+        // 🛑 COMPLETELY IGNORE MIC IF AI IS SPEAKING OR THINKING
+        if (isAiSpeaking || isThinking || isPlayingRef.current || isLlmStreamingRef.current) {
+          hasSpokenRef.current = false;
+          speechStartRef.current = null;
           silenceStartRef.current = null;
-        } else if (hasSpokenRef.current) {
-          // User has spoken, now detecting silence
-          if (!silenceStartRef.current) {
-            silenceStartRef.current = Date.now();
-          } else if (Date.now() - silenceStartRef.current > 1500) { 
-            // 🛑 MANUAL MODE: Auto-stop is temporarily disabled so the AI doesn't interrupt the user.
-            // The user will manually click the microphone button to stop recording and send.
-            /*
-            console.log('Silence detected! Stopping mic to process...');
-            triggerHaptic('heavy'); 
-            stopListening(true);
-            return;
-            */
+        } else {
+          if (avg > 18) { 
+            // Volume threshold exceeded (User is speaking)
+            if (!hasSpokenRef.current) {
+              hasSpokenRef.current = true;
+              speechStartRef.current = Date.now();
+            }
+            silenceStartRef.current = null;
+          } else if (hasSpokenRef.current) {
+            // User has spoken, now detecting silence
+            if (!silenceStartRef.current) {
+              silenceStartRef.current = Date.now();
+            } else if (Date.now() - silenceStartRef.current > 2000) { 
+              // 🛑 2.0s SILENCE DETECTED.
+              // Now check if the user actually spoke a full sentence, or just sneezed/coughed.
+              const speechDuration = silenceStartRef.current - (speechStartRef.current || 0);
+              
+              if (speechDuration < 800) {
+                // Short noise, sneeze, cough. Ignore it.
+                console.log(`[VAD] Ignored short noise (${speechDuration}ms)`);
+                hasSpokenRef.current = false;
+                speechStartRef.current = null;
+                silenceStartRef.current = null;
+              } else {
+                console.log(`[VAD] Valid speech detected (${speechDuration}ms). Stopping mic to process...`);
+                triggerHaptic('heavy'); 
+                stopListening(true);
+                return;
+              }
+            }
           }
         }
         vadFrameRef.current = requestAnimationFrame(checkSilence);
