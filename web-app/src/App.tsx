@@ -903,7 +903,6 @@ function App() {
           <div className="session-panel">
             <div className="session-panel-header">
               <div className="session-panel-title-group">
-                <div className="session-panel-label">Session Intelligence</div>
                 <div className="session-panel-title">Adaptive Tutor Memory</div>
               </div>
               {showBudgetWarning ? (
@@ -990,9 +989,6 @@ function App() {
               </svg>
             )}
           </button>
-        </div>
-        <div className="control-caption">
-          {isListening ? 'Speak naturally. Zero AI will wait for your pause.' : 'Tap once to start your lesson.'}
         </div>
       </div>
     </div>
