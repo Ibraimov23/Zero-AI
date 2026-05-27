@@ -11,7 +11,8 @@ import { KokoroTTS } from 'kokoro-js';
 // ==========================================
 // 1. Environment Setup
 // ==========================================
-// Temporarily use Hugging Face servers since local models were downloaded without Git LFS
+// Configure environment for local/remote models
+// To ensure it works flawlessly on Vercel and locally (without LFS issues), we use the HuggingFace CDN
 env.allowLocalModels = false;
 env.allowRemoteModels = true;
 
