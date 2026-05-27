@@ -1,0 +1,184 @@
+// llm.worker.ts - API & Logic Layer
+// This worker handles interactions with Gemini API, Supabase, and heavy business logic.
+
+// ==========================================
+// 1. State Management
+// ==========================================
+interface MessagePart {
+  text: string;
+}
+
+interface ChatMessage {
+  role: 'user' | 'model';
+  parts: MessagePart[];
+}
+
+const state = {
+  messages: [] as ChatMessage[],
+  apiKey: import.meta.env.VITE_GEMINI_API_KEY || '',
+};
+
+// System instruction for the English Mentor persona
+const SYSTEM_INSTRUCTION = {
+  parts: [
+    {
+      text: "You are an experienced English language mentor. Speak simply, use modern natural phrasing, and correct the user's mistakes gently if they make any. Your response MUST be concise and no longer than 2-3 sentences to maintain a dynamic conversation flow. Do not use complex formatting, just plain text."
+    }
+  ]
+};
+
+// ==========================================
+// 2. Sentence Splitter (Buffering)
+// ==========================================
+// Matches sentence endings: ., ?, !, ,, :, or newline, followed by a space or end of string
+// 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Нарезка теперь идет и по запятым (,), и по двоеточиям (:)
+// Это заставляет TTS начинать озвучивать короткие куски мгновенно, не дожидаясь конца предложения
+const SENTENCE_BOUNDARY_REGEX = /([.!?,:\n]+(?:\s+|$))/;
+
+class SentenceSplitter {
+  private buffer = '';
+
+  processChunk(chunk: string, onSentenceReady: (sentence: string) => void) {
+    this.buffer += chunk;
+    
+    while (true) {
+      const match = this.buffer.match(SENTENCE_BOUNDARY_REGEX);
+      if (match && match.index !== undefined) {
+        const splitIndex = match.index + match[0].length;
+        const sentence = this.buffer.substring(0, splitIndex).trim();
+        
+        if (sentence) {
+          onSentenceReady(sentence);
+        }
+        
+        this.buffer = this.buffer.substring(splitIndex);
+      } else {
+        break;
+      }
+    }
+  }
+
+  flush(onSentenceReady: (sentence: string) => void) {
+    const sentence = this.buffer.trim();
+    if (sentence) {
+      onSentenceReady(sentence);
+    }
+    this.buffer = '';
+  }
+}
+
+// ==========================================
+// 3. Gemini API Integration (Streaming)
+// ==========================================
+async function generateResponse(userText: string) {
+  if (!state.apiKey) {
+    self.postMessage({ type: 'ERROR', payload: 'Gemini API key is missing. Set VITE_GEMINI_API_KEY in .env' });
+    return;
+  }
+
+  // Update history with user's message
+  state.messages.push({ role: 'user', parts: [{ text: userText }] });
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${state.apiKey}`;
+    
+    const requestBody = {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      contents: state.messages,
+      generationConfig: {
+        maxOutputTokens: 150,
+        temperature: 0.7,
+      }
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    }
+
+    if (!response.body) throw new Error('No response body');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    const splitter = new SentenceSplitter();
+    
+    let aiFullResponse = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const dataStr = line.substring(6);
+          if (dataStr === '[DONE]') continue;
+          
+          try {
+            const data = JSON.parse(dataStr);
+            const textChunk = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            
+            if (textChunk) {
+              aiFullResponse += textChunk;
+              // Send raw chunk to UI for typewriter effect
+              self.postMessage({ type: 'TEXT_CHUNK', payload: textChunk });
+              
+              // Process through sentence splitter for TTS
+              splitter.processChunk(textChunk, (sentence) => {
+                self.postMessage({ type: 'SENTENCE_READY', payload: sentence });
+              });
+            }
+          } catch (e) {
+            console.warn('Error parsing SSE data line:', e);
+          }
+        }
+      }
+    }
+
+    // Flush remaining text in the buffer
+    splitter.flush((sentence) => {
+      self.postMessage({ type: 'SENTENCE_READY', payload: sentence });
+    });
+
+    // Update history with AI's full response
+    state.messages.push({ role: 'model', parts: [{ text: aiFullResponse }] });
+
+    self.postMessage({ type: 'STREAM_END' });
+
+  } catch (error) {
+    console.error('Gemini API Error:', error);
+    self.postMessage({ type: 'ERROR', payload: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+// ==========================================
+// 4. Message Event Listener
+// ==========================================
+self.addEventListener('message', async (event: MessageEvent) => {
+  const { type, payload } = event.data;
+  
+  switch (type) {
+    case 'INIT_LLM':
+      console.log('Initializing LLM Worker...');
+      if (payload?.apiKey) {
+        state.apiKey = payload.apiKey;
+      }
+      self.postMessage({ type: 'LLM_READY' });
+      break;
+      
+    case 'GENERATE_RESPONSE':
+      console.log('Generating response for:', payload.prompt);
+      await generateResponse(payload.prompt);
+      break;
+      
+    default:
+      console.error('Unknown message type:', type);
+  }
+});
