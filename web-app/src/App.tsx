@@ -18,14 +18,13 @@ function App() {
     try {
       const formData = new FormData();
       formData.append('file', blob, 'audio.webm');
+      // model and language parameters are now handled by the backend edge function,
+      // but we can still send them here and let the proxy forward them.
       formData.append('model', 'whisper-1');
       formData.append('language', 'en'); // Force English for speed
 
-      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      const response = await fetch('/api/stt', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
-        },
         body: formData,
       });
 
@@ -48,18 +47,12 @@ function App() {
   const synthesizeWithOpenAI = async (text: string) => {
     if (!text.trim()) return;
     try {
-      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      const response = await fetch('/api/tts', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model: 'tts-1', // You can use tts-1-hd for higher quality
-          input: text,
-          voice: 'nova', // Alloy, echo, fable, onyx, nova, or shimmer
-          response_format: 'mp3',
-        }),
+        body: JSON.stringify({ text }),
       });
 
       if (!response.ok) throw new Error(`OpenAI TTS Error: ${response.statusText}`);

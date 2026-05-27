@@ -4,18 +4,13 @@
 // ==========================================
 // 1. State Management
 // ==========================================
-interface MessagePart {
-  text: string;
-}
-
 interface ChatMessage {
-  role: 'user' | 'model';
-  parts: MessagePart[];
+  role: string;
+  parts: Array<{ text: string }>;
 }
 
 const state = {
   messages: [] as ChatMessage[],
-  apiKey: import.meta.env.VITE_GEMINI_API_KEY || '',
   isAborted: false,
 };
 
@@ -33,19 +28,6 @@ function trimContextWindow() {
   }
 }
 
-// System instruction for the English Mentor persona
-const SYSTEM_INSTRUCTION = {
-  parts: [
-    {
-      text: `You are Zero AI, a highly advanced, concise, and conversational voice assistant. 
-RULES:
-1. Keep answers EXTREMELY short (1-2 sentences maximum).
-2. Never use lists, bullet points, or markdown formatting.
-3. Speak naturally like a human in a fast-paced dialogue.
-4. If the user asks a quick question, give a quick answer.`
-    }
-  ]
-};
 
 // ==========================================
 // 2. Sentence Splitter (Buffering)
@@ -90,11 +72,6 @@ class SentenceSplitter {
 // 3. Gemini API Integration (Streaming)
 // ==========================================
 async function generateResponse(userText: string) {
-  if (!state.apiKey) {
-    self.postMessage({ type: 'ERROR', payload: 'Gemini API key is missing. Set VITE_GEMINI_API_KEY in .env' });
-    return;
-  }
-
   // Update history with user's message
   state.messages.push({ role: 'user', parts: [{ text: userText }] });
 
@@ -102,21 +79,17 @@ async function generateResponse(userText: string) {
   trimContextWindow();
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${state.apiKey}`;
-    
-    const requestBody = {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      contents: state.messages,
-      generationConfig: {
-        maxOutputTokens: 150,
-        temperature: 0.7,
-      }
-    };
-
-    const response = await fetch(url, {
+    const response = await fetch('/api/llm', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: state.messages,
+        generationConfig: {
+          temperature: 0.7,
+        }
+      })
     });
 
     if (!response.ok) {
@@ -193,10 +166,7 @@ self.addEventListener('message', async (event: MessageEvent) => {
   
   switch (type) {
     case 'INIT_LLM':
-      console.log('Initializing LLM Worker...');
-      if (payload?.apiKey) {
-        state.apiKey = payload.apiKey;
-      }
+      // Backend handles keys now, so we just say we're ready
       self.postMessage({ type: 'LLM_READY' });
       break;
       
