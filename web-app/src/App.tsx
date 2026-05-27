@@ -382,7 +382,7 @@ function App() {
 
       {/* Greeting and Status Header */}
       <div className="status-header">
-        <div className="greeting-name">Zero AI by Nursultan Ibraimov</div>
+        <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
         <div className="main-prompt">
           {isSessionActive ? (isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : "THINKING...") : "SAY SOMETHING"}
         </div>
