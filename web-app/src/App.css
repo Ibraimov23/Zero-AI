@@ -1309,3 +1309,149 @@ body {
     border-radius: 20px;
   }
 }
+
+@media (max-width: 820px), (pointer: coarse) {
+  .app-container {
+    animation-duration: 30s;
+  }
+
+  .app-container::before {
+    filter: blur(28px);
+    opacity: 0.82;
+  }
+
+  .app-container::after {
+    filter: blur(32px);
+    opacity: 0.6;
+  }
+
+  .scene-ambient {
+    mix-blend-mode: normal;
+  }
+
+  .scene-ambient-primary {
+    filter: blur(24px);
+    opacity: 0.56;
+    animation-duration: 16s;
+  }
+
+  .scene-ambient-secondary {
+    filter: blur(28px);
+    opacity: 0.48;
+    animation-duration: 18s;
+  }
+
+  .scene-layer-top,
+  .scene-layer-mic {
+    animation-duration: 20s;
+  }
+
+  .particles-layer {
+    mix-blend-mode: normal;
+    opacity: 0.85;
+  }
+
+  .particle:nth-child(n + 29) {
+    display: none;
+  }
+
+  .particle {
+    animation-duration: 18s, 6.2s;
+    box-shadow: 0 0 calc(var(--particle-glow, 16px) * 0.68) var(--particle-color, rgba(255, 255, 255, 0.7));
+    filter: blur(calc(var(--particle-blur, 0px) * 0.65));
+  }
+
+  .control-deck {
+    backdrop-filter: blur(14px);
+    box-shadow: 0 18px 52px rgba(2, 6, 23, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+
+  .tag {
+    backdrop-filter: blur(10px);
+  }
+
+  .session-panel {
+    backdrop-filter: blur(12px);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+
+  .orb-container::before {
+    filter: blur(18px);
+  }
+
+  .orb {
+    filter: drop-shadow(0 14px 34px rgba(76, 29, 149, 0.14));
+  }
+
+  .state-speaking .orb {
+    filter: drop-shadow(0 18px 42px rgba(147, 51, 234, 0.2));
+  }
+
+  .petal {
+    box-shadow: inset 0 0 14px rgba(255,255,255,0.16);
+    animation-duration: 10s, 24s;
+  }
+
+  .orb-container.ai-speaking .petal {
+    box-shadow: inset 0 0 18px rgba(255,255,255,0.22), 0 0 18px rgba(192, 132, 252, 0.12);
+  }
+
+  .orb-inner {
+    mix-blend-mode: normal;
+    opacity: 0.42;
+  }
+
+  .orb-core {
+    box-shadow: 0 0 18px #fff, 0 0 34px #e879f9, 0 0 62px #a855f7;
+  }
+
+  .subtitle-stage::after {
+    filter: blur(16px);
+    opacity: 0.42;
+  }
+
+  .user-text,
+  .ai-text {
+    box-shadow: 0 14px 34px rgba(2, 6, 23, 0.18);
+  }
+
+  .mic-zone::before {
+    filter: blur(20px);
+    opacity: 0.46;
+  }
+
+  .mic-wrapper {
+    filter: drop-shadow(0 10px 24px rgba(91, 33, 182, 0.18));
+  }
+
+  .mic-button {
+    box-shadow: 0 8px 20px rgba(139, 92, 246, 0.32), inset 0 2px 4px rgba(255,255,255,0.22);
+  }
+
+  .mic-button.recording {
+    box-shadow: 0 8px 22px rgba(239, 68, 68, 0.36);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-container,
+  .scene-ambient-primary,
+  .scene-ambient-secondary,
+  .particle,
+  .petal,
+  .orb-container::after,
+  .orb-core,
+  .orb-inner,
+  .transcript-card,
+  .response-card.has-content,
+  .response-card.has-content::before,
+  .ai-text,
+  .mic-button.recording,
+  .ripple-1,
+  .ripple-2,
+  .ripple-3 {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.2s !important;
+  }
+}
