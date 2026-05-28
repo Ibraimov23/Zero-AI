@@ -27,6 +27,12 @@ declare global {
 
 const USER_END_OF_TURN_MS = 2200;
 const AI_TO_USER_RESUME_MS = 2000;
+const PRE_SPEECH_CUE_MS = 180;
+const SOFT_BARGE_IN_CUE_MS = 240;
+const VOICE_BARGE_IN_TRIGGER_MS = 560;
+const VOICE_BARGE_IN_RELEASE_MS = 180;
+const VOICE_BARGE_IN_COOLDOWN_MS = 1600;
+const VOICE_BARGE_IN_VOLUME_THRESHOLD = 24;
 const SHORT_VALID_UTTERANCE_MIN_MS = 420;
 const SUSTAINED_SPEECH_MIN_MS = 750;
 const SHORT_VALID_UTTERANCES = new Set([
@@ -85,6 +91,25 @@ interface SessionMetrics {
   memoryItems: number;
 }
 
+type VoiceTelemetryStatus = 'completed' | 'retryable_error' | 'error' | 'aborted' | 'ignored_noise';
+
+interface VoiceTurnTelemetry {
+  turnId: number;
+  startedAt: number;
+  sttMode: 'webrtc' | 'browser' | 'cloud';
+  realtimeFailureReason: string | null;
+  firstTranscriptAt: number | null;
+  llmRequestedAt: number | null;
+  firstLlmChunkAt: number | null;
+  firstAssistantOutputAt: number | null;
+  speechDurationMs: number | null;
+  transcriptChars: number;
+  aiChars: number;
+  ttsFallbackCount: number;
+  status: VoiceTelemetryStatus | null;
+  error: string | null;
+}
+
 const DEFAULT_SESSION_METRICS: SessionMetrics = {
   tutorMode: 'free_speaking',
   lessonFocus: 'general conversation',
@@ -113,21 +138,25 @@ function App() {
   
   const [isListening, setIsListening] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
+  const [isPreSpeechCue, setIsPreSpeechCue] = useState(false);
+  const [isBargeInIntent, setIsBargeInIntent] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
   const [liveAiPreview, setLiveAiPreview] = useState<string>('');
   const [tutorMode, setTutorMode] = useState<TutorMode>('free_speaking');
-  const [lessonFocus, setLessonFocus] = useState<string>('general conversation');
   const [sessionMetrics, setSessionMetrics] = useState<SessionMetrics>(DEFAULT_SESSION_METRICS);
   
   const llmWorkerRef = useRef<Worker | null>(null);
 
   const isListeningRef = useRef(false);
   const isAiSpeakingRef = useRef(false);
+  const isThinkingRef = useRef(false);
   const realtimePeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
   const realtimeTranscriptByItemIdRef = useRef<Map<string, string>>(new Map());
   const realtimeModeRef = useRef<'webrtc' | 'browser' | 'cloud'>('cloud');
   const handledListeningTurnRef = useRef(false);
+  const telemetryTurnIdRef = useRef(0);
+  const turnTelemetryRef = useRef<VoiceTurnTelemetry | null>(null);
 
   const closeRealtimeTranscriptionSession = () => {
     if (realtimeDataChannelRef.current) {
@@ -157,9 +186,122 @@ function App() {
   const getSpeechRecognitionConstructor = () =>
     typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : undefined;
 
+  const beginTurnTelemetry = () => {
+    telemetryTurnIdRef.current += 1;
+    turnTelemetryRef.current = {
+      turnId: telemetryTurnIdRef.current,
+      startedAt: Date.now(),
+      sttMode: 'cloud',
+      realtimeFailureReason: null,
+      firstTranscriptAt: null,
+      llmRequestedAt: null,
+      firstLlmChunkAt: null,
+      firstAssistantOutputAt: null,
+      speechDurationMs: null,
+      transcriptChars: 0,
+      aiChars: 0,
+      ttsFallbackCount: 0,
+      status: null,
+      error: null,
+    };
+  };
+
+  const patchTurnTelemetry = (patch: Partial<VoiceTurnTelemetry>) => {
+    if (!turnTelemetryRef.current) return;
+    turnTelemetryRef.current = {
+      ...turnTelemetryRef.current,
+      ...patch,
+    };
+  };
+
+  const setTurnSttMode = (mode: 'webrtc' | 'browser' | 'cloud') => {
+    patchTurnTelemetry({ sttMode: mode });
+  };
+
+  const setTurnRealtimeFailureReason = (reason: string) => {
+    patchTurnTelemetry({ realtimeFailureReason: reason });
+  };
+
+  const markTranscriptVisible = (text: string, speechDurationMs?: number) => {
+    const current = turnTelemetryRef.current;
+    const nextText = text.trim();
+    if (!current || !nextText) return;
+
+    patchTurnTelemetry({
+      firstTranscriptAt: current.firstTranscriptAt ?? Date.now(),
+      transcriptChars: Math.max(current.transcriptChars, nextText.length),
+      speechDurationMs: speechDurationMs ?? current.speechDurationMs,
+    });
+  };
+
+  const markLlmRequested = () => {
+    const current = turnTelemetryRef.current;
+    if (!current || current.llmRequestedAt) return;
+    patchTurnTelemetry({ llmRequestedAt: Date.now() });
+  };
+
+  const markLlmChunk = (chunk: string) => {
+    const current = turnTelemetryRef.current;
+    if (!current || !chunk) return;
+
+    patchTurnTelemetry({
+      firstLlmChunkAt: current.firstLlmChunkAt ?? Date.now(),
+      aiChars: current.aiChars + chunk.length,
+    });
+  };
+
+  const markAssistantOutput = (textOnly = false) => {
+    const current = turnTelemetryRef.current;
+    if (!current) return;
+
+    patchTurnTelemetry({
+      firstAssistantOutputAt: current.firstAssistantOutputAt ?? Date.now(),
+      ttsFallbackCount: current.ttsFallbackCount + (textOnly ? 1 : 0),
+    });
+  };
+
+  const finalizeTurnTelemetry = (status: VoiceTelemetryStatus, overrides?: Partial<VoiceTurnTelemetry>) => {
+    const current = turnTelemetryRef.current;
+    if (!current || current.status) return;
+
+    const finalTelemetry = {
+      ...current,
+      ...overrides,
+      status,
+    };
+    const elapsed = (timestamp: number | null) => (timestamp ? timestamp - finalTelemetry.startedAt : null);
+
+    console.info('[Voice Telemetry]', {
+      turnId: finalTelemetry.turnId,
+      status: finalTelemetry.status,
+      sttMode: finalTelemetry.sttMode,
+      realtimeFailureReason: finalTelemetry.realtimeFailureReason,
+      speechDurationMs: finalTelemetry.speechDurationMs,
+      firstTranscriptMs: elapsed(finalTelemetry.firstTranscriptAt),
+      llmRequestMs: elapsed(finalTelemetry.llmRequestedAt),
+      firstLlmChunkMs: elapsed(finalTelemetry.firstLlmChunkAt),
+      firstAssistantOutputMs: elapsed(finalTelemetry.firstAssistantOutputAt),
+      transcriptChars: finalTelemetry.transcriptChars,
+      aiChars: finalTelemetry.aiChars,
+      ttsFallbackCount: finalTelemetry.ttsFallbackCount,
+      error: finalTelemetry.error,
+    });
+
+    turnTelemetryRef.current = null;
+  };
+
   const submitUserPrompt = (rawText: string, speechDuration: number, source: 'Cloud STT' | 'Streaming STT') => {
     const text = rawText.trim();
     const lowerText = text.toLowerCase();
+    const resolvedSttMode =
+      source === 'Cloud STT'
+        ? 'cloud'
+        : realtimeModeRef.current === 'browser'
+          ? 'browser'
+          : 'webrtc';
+
+    setTurnSttMode(resolvedSttMode);
+    markTranscriptVisible(text, speechDuration);
 
     if (
       !text ||
@@ -171,6 +313,7 @@ function App() {
       console.log(`[${source}] Ignored hallucination/silence:`, text);
       setStatus('Ready');
       setIsThinking(false);
+      finalizeTurnTelemetry('ignored_noise', { error: 'Ignored hallucination or silence.' });
       if (isSessionActiveRef.current) {
         checkAiFinishedAndResume();
       }
@@ -181,6 +324,7 @@ function App() {
       console.log(`[${source}] Ignored likely noise / filler:`, { text, speechDuration });
       setStatus('Ready');
       setIsThinking(false);
+      finalizeTurnTelemetry('ignored_noise', { error: 'Ignored likely noise or filler.' });
       if (isSessionActiveRef.current) {
         checkAiFinishedAndResume();
       }
@@ -202,6 +346,7 @@ function App() {
     livePreviewResponseIdRef.current = activeResponseIdRef.current;
     hasStartedSpeechForResponseRef.current = false;
     isLlmStreamingRef.current = true;
+    markLlmRequested();
     llmWorkerRef.current?.postMessage({
       type: 'GENERATE_RESPONSE',
       payload: { prompt: text, responseId: activeResponseIdRef.current }
@@ -229,6 +374,7 @@ function App() {
       const data = await response.json();
       if (data.text) {
         const speechDuration = lastSpeechDurationRef.current;
+        setTurnSttMode('cloud');
         submitUserPrompt(data.text, speechDuration, 'Cloud STT');
       }
     } catch (error) {
@@ -306,6 +452,15 @@ function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const passiveBargeInStreamRef = useRef<MediaStream | null>(null);
+  const passiveBargeInContextRef = useRef<AudioContext | null>(null);
+  const passiveBargeInAnalyserRef = useRef<AnalyserNode | null>(null);
+  const passiveBargeInFrameRef = useRef<number | null>(null);
+  const passiveBargeInSpeechStartRef = useRef<number | null>(null);
+  const passiveBargeInSilenceStartRef = useRef<number | null>(null);
+  const passiveBargeInLastTriggerRef = useRef<number>(0);
+  const passiveBargeInStartingRef = useRef<boolean>(false);
+  const softBargeInInProgressRef = useRef<boolean>(false);
 
   // VAD (Voice Activity Detection) Refs
   const vadContextRef = useRef<AudioContext | null>(null);
@@ -334,6 +489,8 @@ function App() {
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const typewriterIntervalRef = useRef<number | null>(null);
   const resumeTimeoutRef = useRef<number | null>(null);
+  const preSpeechCueTimeoutRef = useRef<number | null>(null);
+  const bargeInIntentTimeoutRef = useRef<number | null>(null);
   const isSessionActiveRef = useRef<boolean>(false);
   const activeResponseIdRef = useRef<number>(0);
   const livePreviewResponseIdRef = useRef<number>(0);
@@ -385,6 +542,7 @@ function App() {
     if (!RecognitionCtor) {
       speechRecognitionModeRef.current = 'cloud';
       recognitionEndedRef.current = true;
+      setTurnRealtimeFailureReason('browser_speech_recognition_unavailable');
       return false;
     }
 
@@ -415,6 +573,7 @@ function App() {
       const liveText = getStreamingTranscript();
       if (liveText) {
         setTranscript(liveText);
+        markTranscriptVisible(liveText);
         hasSpokenRef.current = true;
         if (!speechStartRef.current) {
           speechStartRef.current = Date.now();
@@ -445,12 +604,14 @@ function App() {
     speechRecognitionRef.current = recognition;
     speechRecognitionModeRef.current = 'streaming';
     realtimeModeRef.current = 'browser';
+    setTurnSttMode('browser');
     recognition.start();
     return true;
   };
 
   const startRealtimeTranscriptionSession = async (stream: MediaStream) => {
     if (typeof RTCPeerConnection === 'undefined') {
+      setTurnRealtimeFailureReason('webrtc_not_supported');
       return false;
     }
 
@@ -483,6 +644,7 @@ function App() {
             realtimeTranscriptByItemIdRef.current.set(itemId, nextText);
             if (nextText) {
               setTranscript(nextText);
+              markTranscriptVisible(nextText);
             }
           }
 
@@ -497,6 +659,7 @@ function App() {
             handledListeningTurnRef.current = true;
             setTranscript(completedText);
             lastSpeechDurationRef.current = speechStartRef.current ? Math.max(0, Date.now() - speechStartRef.current) : lastSpeechDurationRef.current;
+            markTranscriptVisible(completedText, lastSpeechDurationRef.current);
             const accepted = submitUserPrompt(completedText, lastSpeechDurationRef.current, 'Streaming STT');
             stopListening(false);
 
@@ -509,7 +672,8 @@ function App() {
         }
       });
 
-      const handleRealtimeFailure = () => {
+      const handleRealtimeFailure = (reason: string) => {
+        setTurnRealtimeFailureReason(reason);
         if (realtimeModeRef.current === 'webrtc') {
           realtimeModeRef.current = 'cloud';
         }
@@ -517,12 +681,12 @@ function App() {
 
       peerConnection.addEventListener('connectionstatechange', () => {
         if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) {
-          handleRealtimeFailure();
+          handleRealtimeFailure(`peer_${peerConnection.connectionState}`);
         }
       });
 
-      dataChannel.addEventListener('close', handleRealtimeFailure);
-      dataChannel.addEventListener('error', handleRealtimeFailure);
+      dataChannel.addEventListener('close', () => handleRealtimeFailure('data_channel_closed'));
+      dataChannel.addEventListener('error', () => handleRealtimeFailure('data_channel_error'));
 
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
@@ -541,9 +705,11 @@ function App() {
 
       const answerSdp = await response.text();
       await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      setTurnSttMode('webrtc');
       return true;
     } catch (error) {
       console.warn('Realtime STT init failed, falling back:', error);
+      setTurnRealtimeFailureReason(error instanceof Error ? error.message : String(error));
       closeRealtimeTranscriptionSession();
       return false;
     }
@@ -552,6 +718,10 @@ function App() {
   // Helper to check if AI is completely finished
   const checkAiFinishedAndResume = () => {
     if (!isLlmStreamingRef.current && pendingTtsRequestsRef.current === 0 && audioQueueRef.current.length === 0 && !isPlayingRef.current) {
+      finalizeTurnTelemetry('completed');
+      stopPassiveBargeInMonitor();
+      setIsBargeInIntent(false);
+      setIsPreSpeechCue(false);
       setIsAiSpeaking(false);
       setIsThinking(false);
       setStatus('Ready');
@@ -577,8 +747,173 @@ function App() {
     }
   };
 
+  const clearPreSpeechCue = () => {
+    if (preSpeechCueTimeoutRef.current) {
+      window.clearTimeout(preSpeechCueTimeoutRef.current);
+      preSpeechCueTimeoutRef.current = null;
+    }
+    setIsPreSpeechCue(false);
+  };
+
+  const clearBargeInIntent = () => {
+    if (bargeInIntentTimeoutRef.current) {
+      window.clearTimeout(bargeInIntentTimeoutRef.current);
+      bargeInIntentTimeoutRef.current = null;
+    }
+    setIsBargeInIntent(false);
+  };
+
+  const stopPassiveBargeInMonitor = () => {
+    if (passiveBargeInFrameRef.current) {
+      cancelAnimationFrame(passiveBargeInFrameRef.current);
+      passiveBargeInFrameRef.current = null;
+    }
+
+    passiveBargeInSpeechStartRef.current = null;
+    passiveBargeInSilenceStartRef.current = null;
+    passiveBargeInAnalyserRef.current = null;
+
+    if (passiveBargeInContextRef.current) {
+      passiveBargeInContextRef.current.close();
+      passiveBargeInContextRef.current = null;
+    }
+
+    if (passiveBargeInStreamRef.current) {
+      passiveBargeInStreamRef.current.getTracks().forEach(track => track.stop());
+      passiveBargeInStreamRef.current = null;
+    }
+
+    passiveBargeInStartingRef.current = false;
+  };
+
+  const startPassiveBargeInMonitor = async () => {
+    if (
+      passiveBargeInStartingRef.current ||
+      passiveBargeInStreamRef.current ||
+      softBargeInInProgressRef.current ||
+      isListeningRef.current ||
+      !isSessionActiveRef.current ||
+      (!isAiSpeakingRef.current && !isThinkingRef.current) ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      return;
+    }
+
+    passiveBargeInStartingRef.current = true;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+
+      if (
+        softBargeInInProgressRef.current ||
+        isListeningRef.current ||
+        !isSessionActiveRef.current ||
+        (!isAiSpeakingRef.current && !isThinkingRef.current)
+      ) {
+        stream.getTracks().forEach(track => track.stop());
+        passiveBargeInStartingRef.current = false;
+        return;
+      }
+
+      passiveBargeInStreamRef.current = stream;
+
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      passiveBargeInContextRef.current = new AudioContextClass();
+      const source = passiveBargeInContextRef.current.createMediaStreamSource(stream);
+      passiveBargeInAnalyserRef.current = passiveBargeInContextRef.current.createAnalyser();
+      passiveBargeInAnalyserRef.current.fftSize = 256;
+      source.connect(passiveBargeInAnalyserRef.current);
+
+      const detectUserBargeIn = () => {
+        const analyser = passiveBargeInAnalyserRef.current;
+        if (!analyser) return;
+
+        if (
+          softBargeInInProgressRef.current ||
+          isListeningRef.current ||
+          !isSessionActiveRef.current ||
+          (!isAiSpeakingRef.current && !isThinkingRef.current)
+        ) {
+          stopPassiveBargeInMonitor();
+          return;
+        }
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(dataArray);
+        const sum = dataArray.reduce((a, b) => a + b, 0);
+        const avg = sum / dataArray.length;
+        const now = Date.now();
+
+        if (avg > VOICE_BARGE_IN_VOLUME_THRESHOLD) {
+          passiveBargeInSilenceStartRef.current = null;
+          if (!passiveBargeInSpeechStartRef.current) {
+            passiveBargeInSpeechStartRef.current = now;
+          } else if (
+            now - passiveBargeInSpeechStartRef.current >= VOICE_BARGE_IN_TRIGGER_MS &&
+            now - passiveBargeInLastTriggerRef.current >= VOICE_BARGE_IN_COOLDOWN_MS
+          ) {
+            passiveBargeInLastTriggerRef.current = now;
+            console.info('[Voice Barge-In] Sustained user speech detected during AI response.');
+            void runSoftBargeIn('voice');
+            return;
+          }
+        } else if (passiveBargeInSpeechStartRef.current) {
+          if (!passiveBargeInSilenceStartRef.current) {
+            passiveBargeInSilenceStartRef.current = now;
+          } else if (now - passiveBargeInSilenceStartRef.current >= VOICE_BARGE_IN_RELEASE_MS) {
+            passiveBargeInSpeechStartRef.current = null;
+            passiveBargeInSilenceStartRef.current = null;
+          }
+        }
+
+        passiveBargeInFrameRef.current = requestAnimationFrame(detectUserBargeIn);
+      };
+
+      passiveBargeInFrameRef.current = requestAnimationFrame(detectUserBargeIn);
+    } catch (error) {
+      console.warn('[Voice Barge-In] Passive monitor unavailable:', error);
+    } finally {
+      passiveBargeInStartingRef.current = false;
+    }
+  };
+
+  const runPreSpeechCue = async (responseId: number) => {
+    if (responseId !== activeResponseIdRef.current || hasStartedSpeechForResponseRef.current) {
+      return true;
+    }
+
+    clearPreSpeechCue();
+    setIsPreSpeechCue(true);
+
+    await new Promise<void>((resolve) => {
+      preSpeechCueTimeoutRef.current = window.setTimeout(() => {
+        preSpeechCueTimeoutRef.current = null;
+        resolve();
+      }, PRE_SPEECH_CUE_MS);
+    });
+
+    if (responseId !== activeResponseIdRef.current) {
+      setIsPreSpeechCue(false);
+      return false;
+    }
+
+    setIsPreSpeechCue(false);
+    return true;
+  };
+
   // Interrupt AI playback and generation
   const interruptAi = () => {
+    finalizeTurnTelemetry('aborted', { error: 'Interrupted by user or new turn.' });
+    stopPassiveBargeInMonitor();
+    clearBargeInIntent();
+    clearPreSpeechCue();
     activeResponseIdRef.current += 1;
     livePreviewResponseIdRef.current = activeResponseIdRef.current;
     hasStartedSpeechForResponseRef.current = false;
@@ -622,6 +957,43 @@ function App() {
     llmWorkerRef.current?.postMessage({ type: 'ABORT_GENERATION' });
   };
 
+  const runSoftBargeIn = async (source: 'manual' | 'voice' = 'manual') => {
+    if (isListeningRef.current || softBargeInInProgressRef.current) return;
+
+    if (source === 'manual' && isBargeInIntent) {
+      clearBargeInIntent();
+      setStatus(isAiSpeakingRef.current || isThinkingRef.current ? 'Continuing response...' : 'Ready');
+      return;
+    }
+
+    softBargeInInProgressRef.current = true;
+    stopPassiveBargeInMonitor();
+    triggerHaptic(source === 'voice' ? 'medium' : 'light');
+    setIsBargeInIntent(true);
+    setStatus(source === 'voice' ? 'I hear you. Taking the turn...' : 'Taking the turn...');
+
+    try {
+      await new Promise<void>((resolve) => {
+        bargeInIntentTimeoutRef.current = window.setTimeout(() => {
+          bargeInIntentTimeoutRef.current = null;
+          resolve();
+        }, SOFT_BARGE_IN_CUE_MS);
+      });
+
+      if (!isAiSpeakingRef.current && !isThinkingRef.current && !isLlmStreamingRef.current && !isPlayingRef.current) {
+        clearBargeInIntent();
+        return;
+      }
+
+      clearBargeInIntent();
+      isSessionActiveRef.current = true;
+      interruptAi();
+      await startListening({ interruptCurrentAi: false });
+    } finally {
+      softBargeInInProgressRef.current = false;
+    }
+  };
+
   // Helper to play TTS audio sequentially
   const playNextAudio = async () => {
     if (isPlayingRef.current || audioQueueRef.current.length === 0) {
@@ -642,9 +1014,28 @@ function App() {
       return;
     }
 
+    const shouldRunPreSpeechCue =
+      audioData.responseId === activeResponseIdRef.current &&
+      !hasStartedSpeechForResponseRef.current;
+
+    if (shouldRunPreSpeechCue) {
+      const canContinue = await runPreSpeechCue(audioData.responseId);
+      if (!canContinue) {
+        isPlayingRef.current = false;
+        currentAudioSourceRef.current = null;
+        if (audioQueueRef.current.length === 0) {
+          checkAiFinishedAndResume();
+        } else {
+          playNextAudio();
+        }
+        return;
+      }
+    }
+
     if (audioData.responseId === activeResponseIdRef.current) {
       hasStartedSpeechForResponseRef.current = true;
       setLiveAiPreview('');
+      markAssistantOutput(audioData.textOnly);
     }
 
     if (!playbackContextRef.current) {
@@ -800,6 +1191,7 @@ function App() {
           break;
           
         case 'TEXT_CHUNK':
+          markLlmChunk(payload?.text ?? '');
           if (
             payload?.responseId === activeResponseIdRef.current &&
             livePreviewResponseIdRef.current === payload.responseId &&
@@ -812,7 +1204,6 @@ function App() {
         case 'SESSION_METRICS':
           setSessionMetrics(payload);
           setTutorMode(payload.tutorMode);
-          setLessonFocus(payload.lessonFocus);
           break;
           
         case 'SENTENCE_READY':
@@ -836,8 +1227,18 @@ function App() {
         case 'ERROR':
           console.error('[LLM Worker Error]:', payload);
           if (!payload?.responseId || payload.responseId === activeResponseIdRef.current) {
-            setStatus(`LLM Error: ${payload.message ?? payload}`);
+            const nextStatus = payload?.retryable
+              ? 'Gemini is temporarily busy. You can try again in a moment.'
+              : `LLM Error: ${payload.message ?? payload}`;
+            setStatus(nextStatus);
+            setIsThinking(false);
             setLiveAiPreview('');
+            finalizeTurnTelemetry(payload?.retryable ? 'retryable_error' : 'error', {
+              error: payload?.message ?? String(payload),
+            });
+            if (payload?.retryable && isSessionActiveRef.current) {
+              checkAiFinishedAndResume();
+            }
           }
           break;
           
@@ -851,6 +1252,9 @@ function App() {
 
     // Cleanup workers on unmount
     return () => {
+      stopPassiveBargeInMonitor();
+      clearBargeInIntent();
+      clearPreSpeechCue();
       if (vadFrameRef.current) cancelAnimationFrame(vadFrameRef.current);
       if (vadContextRef.current) vadContextRef.current.close();
       if (mediaStreamRef.current) {
@@ -876,19 +1280,29 @@ function App() {
     isAiSpeakingRef.current = isAiSpeaking;
   }, [isAiSpeaking]);
 
+  useEffect(() => {
+    isThinkingRef.current = isThinking;
+  }, [isThinking]);
+
+  useEffect(() => {
+    if (
+      !isListening &&
+      !isBargeInIntent &&
+      isSessionActiveRef.current &&
+      (isAiSpeaking || isThinking)
+    ) {
+      void startPassiveBargeInMonitor();
+    } else {
+      stopPassiveBargeInMonitor();
+    }
+  }, [isListening, isBargeInIntent, isAiSpeaking, isThinking]);
+
   const getDefaultLessonFocus = (mode: TutorMode) => LESSON_FOCUS_OPTIONS[mode][0];
 
   const handleTutorModeChange = (mode: TutorMode) => {
     const nextFocus = getDefaultLessonFocus(mode);
     setTutorMode(mode);
-    setLessonFocus(nextFocus);
     llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode, lessonFocus: nextFocus } });
-  };
-
-  const handleJobInterviewClick = () => {
-    setTutorMode('free_speaking');
-    setLessonFocus('Job interview');
-    llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode: 'free_speaking', lessonFocus: 'Job interview' } });
   };
 
   const handleBudgetReset = () => {
@@ -915,11 +1329,8 @@ function App() {
       isSessionActiveRef.current = false; // Stop the continuous loop
       stopListening(true);
     } else if (isAiSpeaking || isThinking) {
-      // Manual Interrupt
-      console.log('[UI] Interrupting AI');
-      isSessionActiveRef.current = false; // Stop the continuous loop
-      interruptAi();
-      setStatus('Interrupted. Ready.');
+      console.log('[UI] Soft barge-in intent');
+      await runSoftBargeIn();
     } else {
       // Start Listening
       isSessionActiveRef.current = true;
@@ -937,6 +1348,12 @@ function App() {
     }
 
     try {
+      stopPassiveBargeInMonitor();
+      clearBargeInIntent();
+      if (turnTelemetryRef.current && !turnTelemetryRef.current.status) {
+        finalizeTurnTelemetry('aborted', { error: 'Superseded by a new listening turn.' });
+      }
+      beginTurnTelemetry();
       setStatus('Listening...');
       setIsListening(true);
       hasSpokenRef.current = false;
@@ -1118,6 +1535,7 @@ function App() {
   };
 
   const stopListening = (process: boolean) => {
+    stopPassiveBargeInMonitor();
     shouldProcessAudioRef.current = process;
     if (process) {
       const now = Date.now();
@@ -1178,7 +1596,7 @@ function App() {
     }));
   }, []);
 
-  const isBusy = isListening || isAiSpeaking || isThinking;
+  const isBusy = isListening || isAiSpeaking || isThinking || isBargeInIntent;
   const budgetProgress = Math.min(100, Math.round((sessionMetrics.estimatedTotalTokens / sessionMetrics.tokenBudget) * 100));
   const showBudgetWarning = budgetProgress >= 75;
   const isBudgetCritical = budgetProgress >= 90;
@@ -1191,7 +1609,7 @@ function App() {
   const sessionHealthLabel = isBudgetCritical ? 'High Budget' : showBudgetWarning ? 'Budget Warning' : '';
 
   return (
-    <div className={`app-container ${isListening ? 'state-listening' : ''} ${isAiSpeaking ? 'state-speaking' : ''} ${isThinking ? 'state-thinking' : ''}`}>
+    <div className={`app-container ${isListening ? 'state-listening' : ''} ${isAiSpeaking ? 'state-speaking' : ''} ${isThinking ? 'state-thinking' : ''} ${isPreSpeechCue ? 'state-pre-speech' : ''} ${isBargeInIntent ? 'state-barge-in' : ''}`}>
       {/* Background Particles */}
       <div className="particles-layer">
         {particles.map(p => (
@@ -1232,22 +1650,13 @@ function App() {
                 <span>{option.label}</span>
               </button>
             ))}
-            <button
-              className={`tag tutor-tag subgoal-tag ${lessonFocus === 'Job interview' ? 'active' : ''}`}
-              onClick={handleJobInterviewClick}
-              type="button"
-              disabled={isThinking}
-              title="Job interview"
-            >
-              <span>Job interview</span>
-            </button>
           </div>
 
           {/* Greeting and Status Header */}
           <div className="status-header">
             <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
             <div className="main-prompt">
-              {isListening ? "I'M LISTENING" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
+              {isListening ? "I'M LISTENING" : isBargeInIntent ? "JUMPING IN" : isAiSpeaking ? "ZERO AI" : isThinking ? "THINKING..." : "SAY SOMETHING"}
             </div>
             <div className="status-text">{status}</div>
           </div>
@@ -1291,7 +1700,7 @@ function App() {
         </div>
       </div>
       
-      <div className={`orb-container scene-layer scene-layer-orb ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''}`}>
+      <div className={`orb-container scene-layer scene-layer-orb ${isListening ? 'active' : ''} ${isAiSpeaking ? 'ai-speaking' : ''} ${isThinking ? 'thinking' : ''} ${isPreSpeechCue ? 'pre-speech' : ''} ${isBargeInIntent ? 'barge-in' : ''}`}>
         <div className="orb">
           <div className="petal petal-1"></div>
           <div className="petal petal-2"></div>
@@ -1302,7 +1711,7 @@ function App() {
         </div>
       </div>
 
-      <div className={`text-container subtitle-stage scene-layer scene-layer-subtitles ${hasTranscript || hasVisibleAiText ? 'engaged' : ''} ${subtitleLayoutClass}`}>
+      <div className={`text-container subtitle-stage scene-layer scene-layer-subtitles ${hasTranscript || hasVisibleAiText ? 'engaged' : ''} ${subtitleLayoutClass} ${isPreSpeechCue ? 'pre-speech' : ''} ${isBargeInIntent ? 'barge-in' : ''}`}>
         {hasTranscript && (
           <div className="user-text transcript-card">
             <div className="text-label">You said</div>
@@ -1325,7 +1734,7 @@ function App() {
             </>
           )}
           <button 
-            className={`mic-button ${isBusy ? 'recording' : ''}`}
+            className={`mic-button ${isBusy ? 'recording' : ''} ${isBargeInIntent ? 'barge-in' : ''}`}
             onClick={handleMicClick}
             disabled={!isReady}
           >

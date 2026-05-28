@@ -1,5 +1,5 @@
 // llm.worker.ts - API & Logic Layer
-// This worker handles interactions with Gemini API, Supabase, and heavy business logic.
+// This worker handles Gemini streaming, lesson memory, and response chunking for TTS.
 
 // ==========================================
 // 1. State Management
@@ -46,6 +46,9 @@ const MAX_LESSON_MEMORY_ITEMS = 5;
 const TARGET_CONTEXT_TOKENS = 320;
 const SOFT_SPLIT_TARGET_CHARS = 110;
 const SOFT_SPLIT_MIN_CHARS = 68;
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+let currentRequestController: AbortController | null = null;
 
 function isNearBudget() {
   return state.estimatedInputTokens + state.estimatedOutputTokens >= SESSION_TOKEN_BUDGET * 0.75;
@@ -142,6 +145,19 @@ function buildSessionMetrics(): SessionMetrics {
 
 function publishSessionMetrics() {
   self.postMessage({ type: 'SESSION_METRICS', payload: buildSessionMetrics() });
+}
+
+function buildApiError(status: number, statusText: string, details = '') {
+  const retryable = RETRYABLE_STATUS_CODES.has(status);
+  const suffix = details ? ` ${details}` : '';
+  const message = retryable
+    ? 'Gemini is temporarily busy. Please try again in a moment.'
+    : `API Error: ${status} ${statusText}${suffix}`;
+
+  const error = new Error(message) as Error & { status?: number; retryable?: boolean };
+  error.status = status;
+  error.retryable = retryable;
+  return error;
 }
 
 
@@ -267,6 +283,10 @@ async function generateResponse(userText: string, responseId: number) {
   state.messages.push({ role: 'user', parts: [{ text: userText }] });
   compressHistoryIfNeeded();
 
+  const controller = new AbortController();
+  currentRequestController?.abort();
+  currentRequestController = controller;
+
   try {
     const lessonMemory = state.lessonMemory.join(' | ');
     const inputTokens =
@@ -286,11 +306,19 @@ async function generateResponse(userText: string, responseId: number) {
           tutorMode: state.tutorMode,
           lessonFocus: state.lessonFocus,
           lessonMemory,
-        })
+        }),
+        signal: controller.signal,
       });
 
     if (!response.ok) {
-      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      let details = '';
+      try {
+        const errorPayload = await response.json();
+        details = (errorPayload?.error || errorPayload?.details || '').toString().trim();
+      } catch {
+        details = '';
+      }
+      throw buildApiError(response.status, response.statusText, details);
     }
 
     if (!response.body) throw new Error('No response body');
@@ -307,7 +335,7 @@ async function generateResponse(userText: string, responseId: number) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      if (state.isAborted) {
+      if (state.isAborted || controller.signal.aborted) {
         await reader.cancel();
         rollbackPendingUserTurn();
         return;
@@ -318,7 +346,7 @@ async function generateResponse(userText: string, responseId: number) {
       sseBuffer = remaining;
 
       for (const eventBlock of events) {
-        if (state.isAborted) {
+        if (state.isAborted || controller.signal.aborted) {
           await reader.cancel();
           rollbackPendingUserTurn();
           return;
@@ -369,16 +397,29 @@ async function generateResponse(userText: string, responseId: number) {
     self.postMessage({ type: 'STREAM_END', payload: { responseId } });
 
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      rollbackPendingUserTurn();
+      publishSessionMetrics();
+      return;
+    }
+
     rollbackPendingUserTurn();
     publishSessionMetrics();
     console.error('Gemini API Error:', error);
+    const typedError = error as Error & { status?: number; retryable?: boolean };
     self.postMessage({
       type: 'ERROR',
       payload: {
         responseId,
-        message: error instanceof Error ? error.message : String(error),
+        message: typedError?.message ?? String(error),
+        status: typedError?.status,
+        retryable: Boolean(typedError?.retryable),
       }
     });
+  } finally {
+    if (currentRequestController === controller) {
+      currentRequestController = null;
+    }
   }
 }
 
@@ -397,6 +438,8 @@ self.addEventListener('message', async (event: MessageEvent) => {
       
     case 'ABORT_GENERATION':
       state.isAborted = true;
+      currentRequestController?.abort();
+      currentRequestController = null;
       break;
 
     case 'SET_TUTOR_MODE':
