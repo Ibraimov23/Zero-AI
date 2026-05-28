@@ -44,6 +44,8 @@ const SESSION_TOKEN_BUDGET = 1800;
 const MAX_RAW_MESSAGES = 4;
 const MAX_LESSON_MEMORY_ITEMS = 5;
 const TARGET_CONTEXT_TOKENS = 320;
+const SOFT_SPLIT_TARGET_CHARS = 110;
+const SOFT_SPLIT_MIN_CHARS = 68;
 
 function isNearBudget() {
   return state.estimatedInputTokens + state.estimatedOutputTokens >= SESSION_TOKEN_BUDGET * 0.75;
@@ -75,20 +77,21 @@ function messageImportance(message: ChatMessage) {
 }
 
 function compressText(text: string) {
-  return text.replace(/\s+/g, ' ').trim().slice(0, 96);
+  return text.replace(/\s+/g, ' ').trim().slice(0, 72);
 }
 
 function buildMemoryNote(message: ChatMessage) {
   const text = compressText(getMessageText(message));
   if (!text) return '';
-  return message.role === 'user' ? `Learner said: ${text}` : `Tutor noted: ${text}`;
+  return message.role === 'user' ? `Learner: ${text}` : `Tutor: ${text}`;
 }
 
 function compressHistoryIfNeeded(force = false) {
   const nearBudget = isNearBudget();
-  const maxRawMessages = force || nearBudget ? 2 : MAX_RAW_MESSAGES;
-  const maxLessonMemoryItems = force || nearBudget ? 3 : MAX_LESSON_MEMORY_ITEMS;
-  const targetContextTokens = force || nearBudget ? 220 : TARGET_CONTEXT_TOKENS;
+  const isFreeSpeaking = state.tutorMode === 'free_speaking';
+  const maxRawMessages = force || nearBudget ? (isFreeSpeaking ? 1 : 2) : (isFreeSpeaking ? 2 : MAX_RAW_MESSAGES);
+  const maxLessonMemoryItems = force || nearBudget ? (isFreeSpeaking ? 2 : 3) : (isFreeSpeaking ? 3 : MAX_LESSON_MEMORY_ITEMS);
+  const targetContextTokens = force || nearBudget ? (isFreeSpeaking ? 160 : 220) : (isFreeSpeaking ? 220 : TARGET_CONTEXT_TOKENS);
   const historyTokens =
     estimateTokens(state.lessonMemory.join(' ')) +
     state.messages.reduce((total, message) => total + estimateTokens(getMessageText(message)), 0);
@@ -104,7 +107,7 @@ function compressHistoryIfNeeded(force = false) {
     .map((message) => ({ note: buildMemoryNote(message), score: messageImportance(message) }))
     .filter(item => item.note)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 2)
+    .slice(0, isFreeSpeaking ? 1 : 2)
     .map(item => item.note);
 
   if (rankedNotes.length > 0) {
@@ -152,6 +155,30 @@ const SENTENCE_BOUNDARY_REGEX = /([.?!]+(?:\s+|$))/;
 class SentenceSplitter {
   private buffer = '';
 
+  private findSoftBoundary() {
+    const compactBuffer = this.buffer.replace(/\s+/g, ' ').trim();
+    if (compactBuffer.length < SOFT_SPLIT_TARGET_CHARS) return -1;
+
+    const punctuationCandidates = [', ', '; ', ': ', ' - ', ' and ', ' but ', ' because ', ' so '];
+    let boundary = -1;
+
+    for (const candidate of punctuationCandidates) {
+      const index = this.buffer.lastIndexOf(candidate, SOFT_SPLIT_TARGET_CHARS);
+      if (index > boundary) {
+        boundary = index + candidate.length;
+      }
+    }
+
+    if (boundary < SOFT_SPLIT_MIN_CHARS) {
+      const fallbackIndex = this.buffer.lastIndexOf(' ', SOFT_SPLIT_TARGET_CHARS);
+      if (fallbackIndex >= SOFT_SPLIT_MIN_CHARS) {
+        boundary = fallbackIndex;
+      }
+    }
+
+    return boundary;
+  }
+
   processChunk(chunk: string, onSentenceReady: (sentence: string) => void) {
     this.buffer += chunk;
     
@@ -167,7 +194,16 @@ class SentenceSplitter {
         
         this.buffer = this.buffer.substring(splitIndex);
       } else {
-        break;
+        const softBoundary = this.findSoftBoundary();
+        if (softBoundary !== -1) {
+          const sentence = this.buffer.substring(0, softBoundary).trim();
+          if (sentence) {
+            onSentenceReady(sentence);
+          }
+          this.buffer = this.buffer.substring(softBoundary).trimStart();
+        } else {
+          break;
+        }
       }
     }
   }

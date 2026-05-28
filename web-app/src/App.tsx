@@ -3,6 +3,28 @@ import './App.css';
 
 type TutorMode = 'grammar' | 'free_speaking';
 
+type BrowserSpeechRecognition = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  maxAlternatives: number;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
+
+declare global {
+  interface Window {
+    SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  }
+}
+
 const USER_END_OF_TURN_MS = 2200;
 const AI_TO_USER_RESUME_MS = 2000;
 const SHORT_VALID_UTTERANCE_MIN_MS = 420;
@@ -92,6 +114,7 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
+  const [liveAiPreview, setLiveAiPreview] = useState<string>('');
   const [tutorMode, setTutorMode] = useState<TutorMode>('free_speaking');
   const [lessonFocus, setLessonFocus] = useState<string>('general conversation');
   const [sessionMetrics, setSessionMetrics] = useState<SessionMetrics>(DEFAULT_SESSION_METRICS);
@@ -100,6 +123,91 @@ function App() {
 
   const isListeningRef = useRef(false);
   const isAiSpeakingRef = useRef(false);
+  const realtimePeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const realtimeTranscriptByItemIdRef = useRef<Map<string, string>>(new Map());
+  const realtimeModeRef = useRef<'webrtc' | 'browser' | 'cloud'>('cloud');
+  const handledListeningTurnRef = useRef(false);
+
+  const closeRealtimeTranscriptionSession = () => {
+    if (realtimeDataChannelRef.current) {
+      try {
+        realtimeDataChannelRef.current.close();
+      } catch {
+        // noop
+      }
+      realtimeDataChannelRef.current = null;
+    }
+
+    if (realtimePeerConnectionRef.current) {
+      try {
+        realtimePeerConnectionRef.current.close();
+      } catch {
+        // noop
+      }
+      realtimePeerConnectionRef.current = null;
+    }
+
+    realtimeTranscriptByItemIdRef.current.clear();
+    if (realtimeModeRef.current === 'webrtc') {
+      realtimeModeRef.current = 'cloud';
+    }
+  };
+
+  const getSpeechRecognitionConstructor = () =>
+    typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : undefined;
+
+  const submitUserPrompt = (rawText: string, speechDuration: number, source: 'Cloud STT' | 'Streaming STT') => {
+    const text = rawText.trim();
+    const lowerText = text.toLowerCase();
+
+    if (
+      !text ||
+      lowerText === 'thank you.' ||
+      lowerText === 'thank you for watching.' ||
+      lowerText === 'you' ||
+      lowerText.includes('amara.org')
+    ) {
+      console.log(`[${source}] Ignored hallucination/silence:`, text);
+      setStatus('Ready');
+      setIsThinking(false);
+      if (isSessionActiveRef.current) {
+        checkAiFinishedAndResume();
+      }
+      return false;
+    }
+
+    if (isLikelyNoiseTranscript(text, speechDuration)) {
+      console.log(`[${source}] Ignored likely noise / filler:`, { text, speechDuration });
+      setStatus('Ready');
+      setIsThinking(false);
+      if (isSessionActiveRef.current) {
+        checkAiFinishedAndResume();
+      }
+      return false;
+    }
+
+    console.log(`[${source} Transcript]:`, text);
+    setIsThinking(true);
+    activeResponseIdRef.current += 1;
+    currentSentenceIndexRef.current = 0;
+    nextSentenceToPlayRef.current = 0;
+    pendingSentenceAudioRef.current.clear();
+    pendingTtsRequestsRef.current = 0;
+    audioQueueRef.current = [];
+    setTranscript(text);
+    setStatus('Reasoning (Gemini 2.5 Flash)...');
+    setAiResponse('');
+    setLiveAiPreview('');
+    livePreviewResponseIdRef.current = activeResponseIdRef.current;
+    hasStartedSpeechForResponseRef.current = false;
+    isLlmStreamingRef.current = true;
+    llmWorkerRef.current?.postMessage({
+      type: 'GENERATE_RESPONSE',
+      payload: { prompt: text, responseId: activeResponseIdRef.current }
+    });
+    return true;
+  };
 
   // OpenAI Whisper STT Integration (Cloud - Ultra Fast)
   const transcribeWithOpenAI = async (blob: Blob) => {
@@ -120,54 +228,8 @@ function App() {
       
       const data = await response.json();
       if (data.text) {
-        const text = data.text.trim();
-        const lowerText = text.toLowerCase();
-        
         const speechDuration = lastSpeechDurationRef.current;
-
-        // 🛑 Ignore known Whisper hallucinations on silence or short background noises
-        if (
-          !text || 
-          lowerText === 'thank you.' || 
-          lowerText === 'thank you for watching.' || 
-          lowerText === 'you' ||
-          lowerText.includes('amara.org')
-        ) {
-          console.log('[Cloud STT] Ignored hallucination/silence:', text);
-          setStatus('Ready');
-          setIsThinking(false);
-          // Resume listening loop since this was a false alarm
-          if (isSessionActiveRef.current) {
-            checkAiFinishedAndResume();
-          }
-          return;
-        }
-
-        if (isLikelyNoiseTranscript(text, speechDuration)) {
-          console.log('[Cloud STT] Ignored likely noise / filler:', { text, speechDuration });
-          setStatus('Ready');
-          setIsThinking(false);
-          if (isSessionActiveRef.current) {
-            checkAiFinishedAndResume();
-          }
-          return;
-        }
-
-        console.log('[Cloud STT Transcript]:', text);
-        activeResponseIdRef.current += 1;
-        currentSentenceIndexRef.current = 0;
-        nextSentenceToPlayRef.current = 0;
-        pendingSentenceAudioRef.current.clear();
-        pendingTtsRequestsRef.current = 0;
-        audioQueueRef.current = [];
-        setTranscript(text);
-        setStatus('Reasoning (Gemini 2.5 Flash)...');
-        setAiResponse('');
-        isLlmStreamingRef.current = true;
-        llmWorkerRef.current?.postMessage({
-          type: 'GENERATE_RESPONSE',
-          payload: { prompt: text, responseId: activeResponseIdRef.current }
-        });
+        submitUserPrompt(data.text, speechDuration, 'Cloud STT');
       }
     } catch (error) {
       console.error('Cloud STT Error:', error);
@@ -274,13 +336,218 @@ function App() {
   const resumeTimeoutRef = useRef<number | null>(null);
   const isSessionActiveRef = useRef<boolean>(false);
   const activeResponseIdRef = useRef<number>(0);
+  const livePreviewResponseIdRef = useRef<number>(0);
+  const hasStartedSpeechForResponseRef = useRef<boolean>(false);
   const currentSentenceIndexRef = useRef<number>(0);
   const nextSentenceToPlayRef = useRef<number>(0);
   const pendingSentenceAudioRef = useRef<Map<number, {buffer: ArrayBuffer | null, text: string, responseId: number, textOnly: boolean}>>(new Map());
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const speechRecognitionModeRef = useRef<'streaming' | 'cloud'>('cloud');
+  const speechFinalTranscriptRef = useRef<string>('');
+  const speechInterimTranscriptRef = useRef<string>('');
+  const recognitionStopRequestedRef = useRef<boolean>(false);
+  const recognitionHasErrorRef = useRef<boolean>(false);
+  const recognitionEndedRef = useRef<boolean>(true);
+  const streamingTranscriptHandledRef = useRef<boolean>(false);
   
   // NEW: Ref to track if LLM is still streaming and pending TTS requests
   const isLlmStreamingRef = useRef<boolean>(false);
   const pendingTtsRequestsRef = useRef<number>(0);
+
+  const resetStreamingRecognitionState = () => {
+    speechFinalTranscriptRef.current = '';
+    speechInterimTranscriptRef.current = '';
+    recognitionStopRequestedRef.current = false;
+    recognitionHasErrorRef.current = false;
+    recognitionEndedRef.current = true;
+    streamingTranscriptHandledRef.current = false;
+  };
+
+  const getStreamingTranscript = () =>
+    [speechFinalTranscriptRef.current, speechInterimTranscriptRef.current]
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const trySubmitStreamingTranscript = () => {
+    const text = getStreamingTranscript();
+    if (!text) return false;
+    if (recognitionHasErrorRef.current && text.split(/\s+/).length < 2) return false;
+
+    streamingTranscriptHandledRef.current = true;
+    speechFinalTranscriptRef.current = '';
+    speechInterimTranscriptRef.current = '';
+    return submitUserPrompt(text, lastSpeechDurationRef.current, 'Streaming STT');
+  };
+
+  const startStreamingSpeechRecognition = () => {
+    const RecognitionCtor = getSpeechRecognitionConstructor();
+    if (!RecognitionCtor) {
+      speechRecognitionModeRef.current = 'cloud';
+      recognitionEndedRef.current = true;
+      return false;
+    }
+
+    const recognition = new RecognitionCtor();
+    recognition.lang = 'en-US';
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      let nextFinal = speechFinalTranscriptRef.current;
+      let nextInterim = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i]?.[0]?.transcript?.trim();
+        if (!transcript) continue;
+
+        if (event.results[i].isFinal) {
+          nextFinal = `${nextFinal} ${transcript}`.trim();
+        } else {
+          nextInterim = `${nextInterim} ${transcript}`.trim();
+        }
+      }
+
+      speechFinalTranscriptRef.current = nextFinal;
+      speechInterimTranscriptRef.current = nextInterim;
+
+      const liveText = getStreamingTranscript();
+      if (liveText) {
+        setTranscript(liveText);
+        hasSpokenRef.current = true;
+        if (!speechStartRef.current) {
+          speechStartRef.current = Date.now();
+        }
+        silenceStartRef.current = null;
+      }
+    };
+
+    recognition.onerror = (event) => {
+      recognitionHasErrorRef.current = true;
+      console.warn('[Streaming STT Error]:', event?.error ?? event);
+    };
+
+    recognition.onend = () => {
+      speechRecognitionRef.current = null;
+      recognitionEndedRef.current = true;
+
+      if (isListeningRef.current && !recognitionStopRequestedRef.current && !recognitionHasErrorRef.current) {
+        window.setTimeout(() => {
+          if (isListeningRef.current && !recognitionStopRequestedRef.current) {
+            startStreamingSpeechRecognition();
+          }
+        }, 80);
+      }
+    };
+
+    recognitionEndedRef.current = false;
+    speechRecognitionRef.current = recognition;
+    speechRecognitionModeRef.current = 'streaming';
+    realtimeModeRef.current = 'browser';
+    recognition.start();
+    return true;
+  };
+
+  const startRealtimeTranscriptionSession = async (stream: MediaStream) => {
+    if (typeof RTCPeerConnection === 'undefined') {
+      return false;
+    }
+
+    closeRealtimeTranscriptionSession();
+
+    try {
+      const peerConnection = new RTCPeerConnection();
+      realtimePeerConnectionRef.current = peerConnection;
+      realtimeModeRef.current = 'webrtc';
+
+      stream.getAudioTracks().forEach((track) => {
+        peerConnection.addTrack(track, stream);
+      });
+
+      const dataChannel = peerConnection.createDataChannel('oai-events');
+      realtimeDataChannelRef.current = dataChannel;
+
+      dataChannel.addEventListener('open', () => {
+        setStatus('Listening realtime...');
+      });
+
+      dataChannel.addEventListener('message', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+
+          if (payload?.type === 'conversation.item.input_audio_transcription.delta') {
+            const itemId = payload.item_id || 'current';
+            const previousText = realtimeTranscriptByItemIdRef.current.get(itemId) || '';
+            const nextText = `${previousText}${payload.delta || ''}`.trim();
+            realtimeTranscriptByItemIdRef.current.set(itemId, nextText);
+            if (nextText) {
+              setTranscript(nextText);
+            }
+          }
+
+          if (payload?.type === 'conversation.item.input_audio_transcription.completed') {
+            const completedText = (payload.transcript || '').trim();
+            if (!completedText || handledListeningTurnRef.current) {
+              return;
+            }
+
+            const itemId = payload.item_id || 'current';
+            realtimeTranscriptByItemIdRef.current.set(itemId, completedText);
+            handledListeningTurnRef.current = true;
+            setTranscript(completedText);
+            lastSpeechDurationRef.current = speechStartRef.current ? Math.max(0, Date.now() - speechStartRef.current) : lastSpeechDurationRef.current;
+            const accepted = submitUserPrompt(completedText, lastSpeechDurationRef.current, 'Streaming STT');
+            stopListening(false);
+
+            if (!accepted && isSessionActiveRef.current) {
+              checkAiFinishedAndResume();
+            }
+          }
+        } catch (error) {
+          console.warn('Realtime STT message parse error:', error);
+        }
+      });
+
+      const handleRealtimeFailure = () => {
+        if (realtimeModeRef.current === 'webrtc') {
+          realtimeModeRef.current = 'cloud';
+        }
+      };
+
+      peerConnection.addEventListener('connectionstatechange', () => {
+        if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) {
+          handleRealtimeFailure();
+        }
+      });
+
+      dataChannel.addEventListener('close', handleRealtimeFailure);
+      dataChannel.addEventListener('error', handleRealtimeFailure);
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      const response = await fetch('/api/realtime-stt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sdp',
+        },
+        body: offer.sdp,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Realtime STT session failed: ${response.status} ${response.statusText}`);
+      }
+
+      const answerSdp = await response.text();
+      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      return true;
+    } catch (error) {
+      console.warn('Realtime STT init failed, falling back:', error);
+      closeRealtimeTranscriptionSession();
+      return false;
+    }
+  };
 
   // Helper to check if AI is completely finished
   const checkAiFinishedAndResume = () => {
@@ -313,6 +580,8 @@ function App() {
   // Interrupt AI playback and generation
   const interruptAi = () => {
     activeResponseIdRef.current += 1;
+    livePreviewResponseIdRef.current = activeResponseIdRef.current;
+    hasStartedSpeechForResponseRef.current = false;
     currentSentenceIndexRef.current = 0;
     nextSentenceToPlayRef.current = 0;
     pendingSentenceAudioRef.current.clear();
@@ -338,6 +607,18 @@ function App() {
     isPlayingRef.current = false;
     setIsAiSpeaking(false);
     setIsThinking(false);
+    setLiveAiPreview('');
+    closeRealtimeTranscriptionSession();
+    if (speechRecognitionRef.current) {
+      recognitionStopRequestedRef.current = true;
+      try {
+        speechRecognitionRef.current.abort();
+      } catch {
+        // noop
+      }
+      speechRecognitionRef.current = null;
+    }
+    resetStreamingRecognitionState();
     llmWorkerRef.current?.postMessage({ type: 'ABORT_GENERATION' });
   };
 
@@ -359,6 +640,11 @@ function App() {
       isPlayingRef.current = false;
       setIsAiSpeaking(false);
       return;
+    }
+
+    if (audioData.responseId === activeResponseIdRef.current) {
+      hasStartedSpeechForResponseRef.current = true;
+      setLiveAiPreview('');
     }
 
     if (!playbackContextRef.current) {
@@ -514,8 +800,13 @@ function App() {
           break;
           
         case 'TEXT_CHUNK':
-          // We ignore TEXT_CHUNK in the UI now, because we stream it via the teleprompter 
-          // synchronized with audio in `playNextAudio`.
+          if (
+            payload?.responseId === activeResponseIdRef.current &&
+            livePreviewResponseIdRef.current === payload.responseId &&
+            !hasStartedSpeechForResponseRef.current
+          ) {
+            setLiveAiPreview(prev => prev + (payload.text ?? ''));
+          }
           break;
 
         case 'SESSION_METRICS':
@@ -546,6 +837,7 @@ function App() {
           console.error('[LLM Worker Error]:', payload);
           if (!payload?.responseId || payload.responseId === activeResponseIdRef.current) {
             setStatus(`LLM Error: ${payload.message ?? payload}`);
+            setLiveAiPreview('');
           }
           break;
           
@@ -563,6 +855,14 @@ function App() {
       if (vadContextRef.current) vadContextRef.current.close();
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+      closeRealtimeTranscriptionSession();
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.abort();
+        } catch {
+          // noop
+        }
       }
       llmWorkerRef.current?.terminate();
     };
@@ -644,6 +944,12 @@ function App() {
       speechStartRef.current = null;
       lastSpeechDurationRef.current = 0;
       shouldProcessAudioRef.current = true;
+      handledListeningTurnRef.current = false;
+      realtimeTranscriptByItemIdRef.current.clear();
+      realtimeModeRef.current = 'cloud';
+      setTranscript('');
+      resetStreamingRecognitionState();
+      speechRecognitionModeRef.current = 'cloud';
       
       // 🛑 ПРИЧИНА 3 ИСПРАВЛЕНА: Разблокировка AudioContext на iPhone (Safari)
       if (!playbackContextRef.current) {
@@ -667,8 +973,25 @@ function App() {
         video: false 
       });
       mediaStreamRef.current = stream;
+
+      const hasRealtimeSession = await startRealtimeTranscriptionSession(stream);
+
+      if (!hasRealtimeSession && startStreamingSpeechRecognition()) {
+        setStatus('Listening live...');
+      }
       
-      const mediaRecorder = new MediaRecorder(stream);
+      const preferredMimeType = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+      ].find((mimeType) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported?.(mimeType));
+
+      const mediaRecorder = preferredMimeType
+        ? new MediaRecorder(stream, {
+            mimeType: preferredMimeType,
+            audioBitsPerSecond: 24000,
+          })
+        : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -682,17 +1005,26 @@ function App() {
         setIsListening(false);
 
         if (!shouldProcessAudioRef.current) {
-          setIsThinking(false);
+          if (!handledListeningTurnRef.current) {
+            setIsThinking(false);
+          }
+          handledListeningTurnRef.current = false;
           return; // Discard audio if stopped forcefully
         }
         
-        setIsThinking(true); // Start thinking animation
-        setStatus('Sending to OpenAI STT...');
-        
         try {
+          if (speechRecognitionModeRef.current === 'streaming') {
+            await new Promise(resolve => window.setTimeout(resolve, recognitionEndedRef.current ? 40 : 260));
+            if (streamingTranscriptHandledRef.current || trySubmitStreamingTranscript()) {
+              return;
+            }
+          }
+
+          setIsThinking(true); // Start thinking animation
+          setStatus('Sending to OpenAI STT...');
           const blob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
           // FAST CLOUD STT: Send blob directly to OpenAI
-          transcribeWithOpenAI(blob);
+          await transcribeWithOpenAI(blob);
         } catch (error) {
           console.error('Audio processing error:', error);
           setStatus('Error: Failed to process audio');
@@ -750,6 +1082,12 @@ function App() {
               // A calm pause means the learner has likely finished this turn.
               // Now check if the user actually spoke a full sentence, or just sneezed/coughed.
               const speechDuration = silenceStartRef.current - (speechStartRef.current || 0);
+
+              if (realtimeModeRef.current === 'webrtc' && Date.now() - silenceStartRef.current < USER_END_OF_TURN_MS + 2200) {
+                lastSpeechDurationRef.current = speechDuration;
+                vadFrameRef.current = requestAnimationFrame(checkSilence);
+                return;
+              }
               
               if (speechDuration < 800) {
                 // Short noise, sneeze, cough. Ignore it.
@@ -770,7 +1108,7 @@ function App() {
         vadFrameRef.current = requestAnimationFrame(checkSilence);
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(250);
       checkSilence();
       
     } catch (err) {
@@ -786,6 +1124,15 @@ function App() {
       const speechStart = speechStartRef.current;
       lastSpeechDurationRef.current = speechStart ? Math.max(0, now - speechStart) : lastSpeechDurationRef.current;
     }
+
+    if (speechRecognitionRef.current) {
+      recognitionStopRequestedRef.current = true;
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // noop
+      }
+    }
     
     if (vadFrameRef.current) {
       cancelAnimationFrame(vadFrameRef.current);
@@ -795,6 +1142,8 @@ function App() {
       vadContextRef.current.close();
       vadContextRef.current = null;
     }
+
+    closeRealtimeTranscriptionSession();
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
@@ -833,9 +1182,12 @@ function App() {
   const budgetProgress = Math.min(100, Math.round((sessionMetrics.estimatedTotalTokens / sessionMetrics.tokenBudget) * 100));
   const showBudgetWarning = budgetProgress >= 75;
   const isBudgetCritical = budgetProgress >= 90;
-  const hasTranscript = Boolean(transcript && !isListening);
+  const hasTranscript = Boolean(transcript);
   const hasAiResponse = Boolean(aiResponse);
-  const subtitleLayoutClass = hasTranscript && hasAiResponse ? 'dual-card' : hasTranscript || hasAiResponse ? 'single-card' : 'idle';
+  const hasLiveAiPreview = Boolean(liveAiPreview && !hasAiResponse);
+  const visibleAiText = hasAiResponse ? aiResponse : liveAiPreview;
+  const hasVisibleAiText = Boolean(visibleAiText);
+  const subtitleLayoutClass = hasTranscript && hasVisibleAiText ? 'dual-card' : hasTranscript || hasVisibleAiText ? 'single-card' : 'idle';
   const sessionHealthLabel = isBudgetCritical ? 'High Budget' : showBudgetWarning ? 'Budget Warning' : '';
 
   return (
@@ -950,16 +1302,16 @@ function App() {
         </div>
       </div>
 
-      <div className={`text-container subtitle-stage scene-layer scene-layer-subtitles ${hasTranscript || hasAiResponse ? 'engaged' : ''} ${subtitleLayoutClass}`}>
+      <div className={`text-container subtitle-stage scene-layer scene-layer-subtitles ${hasTranscript || hasVisibleAiText ? 'engaged' : ''} ${subtitleLayoutClass}`}>
         {hasTranscript && (
           <div className="user-text transcript-card">
             <div className="text-label">You said</div>
             {transcript}
           </div>
         )}
-        <div className={`ai-text response-card ${hasAiResponse ? 'has-content' : 'is-placeholder'}`}>
+        <div className={`ai-text response-card ${hasVisibleAiText ? 'has-content' : 'is-placeholder'} ${hasLiveAiPreview ? 'is-live-preview' : ''}`}>
           <div className="text-label ai-label">Zero AI</div>
-          {aiResponse ? aiResponse : <span className="placeholder-text">Wait for response...</span>}
+          {visibleAiText ? visibleAiText : <span className="placeholder-text">Wait for response...</span>}
         </div>
       </div>
 
