@@ -30,9 +30,9 @@ export default async function handler(req: Request) {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.6,
+            threshold: 0.58,
             prefix_padding_ms: 320,
-            silence_duration_ms: 900,
+            silence_duration_ms: 780,
           },
         },
       },
