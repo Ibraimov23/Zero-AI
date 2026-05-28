@@ -120,16 +120,6 @@ const DEFAULT_SESSION_METRICS: SessionMetrics = {
   memoryItems: 0,
 };
 
-const TUTOR_MODE_OPTIONS: Array<{ value: TutorMode; label: string; hint: string }> = [
-  { value: 'grammar', label: 'Grammar', hint: 'Fix grammar and explain clearly' },
-  { value: 'free_speaking', label: 'Free Speaking', hint: 'Natural conversation practice' },
-];
-
-const LESSON_FOCUS_OPTIONS: Record<TutorMode, string[]> = {
-  grammar: ['past tense', 'articles', 'prepositions', 'sentence order'],
-  free_speaking: ['general conversation'],
-};
-
 function App() {
   const [status, setStatus] = useState<string>('Initializing...');
   const [isReady, setIsReady] = useState(false);
@@ -142,7 +132,6 @@ function App() {
   const [isBargeInIntent, setIsBargeInIntent] = useState(false);
   const [aiResponse, setAiResponse] = useState<string>('');
   const [liveAiPreview, setLiveAiPreview] = useState<string>('');
-  const [tutorMode, setTutorMode] = useState<TutorMode>('free_speaking');
   const [sessionMetrics, setSessionMetrics] = useState<SessionMetrics>(DEFAULT_SESSION_METRICS);
   
   const llmWorkerRef = useRef<Worker | null>(null);
@@ -1206,7 +1195,6 @@ function App() {
 
         case 'SESSION_METRICS':
           setSessionMetrics(payload);
-          setTutorMode(payload.tutorMode);
           break;
           
         case 'SENTENCE_READY':
@@ -1300,14 +1288,6 @@ function App() {
       stopPassiveBargeInMonitor();
     }
   }, [isListening, isBargeInIntent, isAiSpeaking, isThinking]);
-
-  const getDefaultLessonFocus = (mode: TutorMode) => LESSON_FOCUS_OPTIONS[mode][0];
-
-  const handleTutorModeChange = (mode: TutorMode) => {
-    const nextFocus = getDefaultLessonFocus(mode);
-    setTutorMode(mode);
-    llmWorkerRef.current?.postMessage({ type: 'SET_TUTOR_MODE', payload: { mode, lessonFocus: nextFocus } });
-  };
 
   const handleBudgetReset = () => {
     llmWorkerRef.current?.postMessage({ type: 'RESET_SESSION_BUDGET' });
@@ -1610,7 +1590,7 @@ function App() {
   const visibleAiText = hasAiResponse ? aiResponse : liveAiPreview;
   const hasVisibleAiText = Boolean(visibleAiText);
   const subtitleLayoutClass = hasTranscript && hasVisibleAiText ? 'dual-card' : hasTranscript || hasVisibleAiText ? 'single-card' : 'idle';
-  const sessionHealthLabel = isBudgetCritical ? 'High Budget' : showBudgetWarning ? 'Budget Warning' : '';
+  const sessionHealthLabel = isBudgetCritical ? 'Context High' : showBudgetWarning ? 'Context Notice' : '';
 
   return (
     <div className={`app-container ${isListening ? 'state-listening' : ''} ${isAiSpeaking ? 'state-speaking' : ''} ${isThinking ? 'state-thinking' : ''} ${isPreSpeechCue ? 'state-pre-speech' : ''} ${isBargeInIntent ? 'state-barge-in' : ''}`}>
@@ -1641,21 +1621,6 @@ function App() {
 
       <div className="hero-shell scene-layer scene-layer-top">
         <div className="control-deck">
-          <div className="top-tags tutor-mode-row">
-            {TUTOR_MODE_OPTIONS.map(option => (
-              <button
-                key={option.value}
-                className={`tag tutor-tag ${tutorMode === option.value ? 'active' : ''}`}
-                onClick={() => handleTutorModeChange(option.value)}
-                type="button"
-                disabled={isThinking}
-                title={option.hint}
-              >
-                <span>{option.label}</span>
-              </button>
-            ))}
-          </div>
-
           {/* Greeting and Status Header */}
           <div className="status-header">
             <div className="greeting-name">Zero AI by Nursultan and Aliya</div>
@@ -1668,7 +1633,7 @@ function App() {
           <div className="session-panel">
             <div className="session-panel-header">
               <div className="session-panel-title-group">
-                <div className="session-panel-title">Adaptive Tutor Memory</div>
+                <div className="session-panel-title">Conversation Context</div>
               </div>
               {showBudgetWarning ? (
                 <div className={`session-health-badge ${isBudgetCritical ? 'critical' : 'warning'}`}>
@@ -1683,21 +1648,21 @@ function App() {
               <div className={`budget-warning ${isBudgetCritical ? 'critical' : ''}`}>
                 <div className="budget-warning-text">
                   {isBudgetCritical
-                    ? 'Session budget is very high. Reset now or compress memory to save tokens.'
-                    : 'Session budget reached 75%. You can compress memory or reset the session to save tokens.'}
+                    ? 'Conversation context is getting heavy. Clear it now or trim it to keep replies fast.'
+                    : 'Conversation context reached 75%. You can trim it or clear it to keep replies fast.'}
                 </div>
                 <div className="budget-warning-actions">
                   <button className="secondary-action-button" type="button" onClick={handleCompressMemory}>
-                    Compress Memory
+                    Trim Context
                   </button>
                   <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
-                    Reset Session
+                    Clear Context
                   </button>
                 </div>
               </div>
             ) : (
               <button className="reset-budget-button" type="button" onClick={handleBudgetReset}>
-                Reset Session
+                Clear Context
               </button>
             )}
           </div>
