@@ -793,7 +793,8 @@ function App() {
       softBargeInInProgressRef.current ||
       isListeningRef.current ||
       !isSessionActiveRef.current ||
-      (!isAiSpeakingRef.current && !isThinkingRef.current) ||
+      isAiSpeakingRef.current ||
+      !isThinkingRef.current ||
       !navigator.mediaDevices?.getUserMedia
     ) {
       return;
@@ -815,7 +816,8 @@ function App() {
         softBargeInInProgressRef.current ||
         isListeningRef.current ||
         !isSessionActiveRef.current ||
-        (!isAiSpeakingRef.current && !isThinkingRef.current)
+        isAiSpeakingRef.current ||
+        !isThinkingRef.current
       ) {
         stream.getTracks().forEach(track => track.stop());
         passiveBargeInStartingRef.current = false;
@@ -839,7 +841,8 @@ function App() {
           softBargeInInProgressRef.current ||
           isListeningRef.current ||
           !isSessionActiveRef.current ||
-          (!isAiSpeakingRef.current && !isThinkingRef.current)
+          isAiSpeakingRef.current ||
+          !isThinkingRef.current
         ) {
           stopPassiveBargeInMonitor();
           return;
@@ -1289,7 +1292,8 @@ function App() {
       !isListening &&
       !isBargeInIntent &&
       isSessionActiveRef.current &&
-      (isAiSpeaking || isThinking)
+      isThinking &&
+      !isAiSpeaking
     ) {
       void startPassiveBargeInMonitor();
     } else {
